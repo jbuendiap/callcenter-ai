@@ -1,24 +1,22 @@
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 app = FastAPI()
 
-@app.get("/")
-def home():
-    return {"message": "Call Center AI funcionando"}
-from fastapi import FastAPI, Request
+class Message(BaseModel):
+    message: str
 
-app = FastAPI()
+@app.post("/")
+async def hotel_ai(data: Message):
+    text = data.message.lower()
 
-@app.get("/")
-def home():
-    return {"message": "Call Center AI funcionando"}
+    if "precio" in text or "cuesta" in text:
+        return {"response": "Las habitaciones empiezan desde 120 dólares por noche."}
 
-@app.post("/call")
-async def receive_call(request: Request):
-    data = await request.json()
-    
-    print("Llamada recibida:", data)
+    if "reservar" in text or "reserva" in text:
+        return {"response": "Claro, puedo ayudarte con tu reserva. ¿Para qué fecha deseas la habitación?"}
 
-    return {
-        "response": "Hola, gracias por llamar al hotel. ¿En qué puedo ayudarte?"
-    }
+    if "servicios" in text:
+        return {"response": "El hotel tiene piscina, wifi gratis, restaurante y transporte al aeropuerto."}
+
+    return {"response": "Claro, con gusto te ayudo. ¿En qué puedo asistirte?"}
