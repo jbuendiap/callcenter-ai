@@ -1,22 +1,34 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import CharacterTextSplitter
 
 app = FastAPI()
 
 class Message(BaseModel):
     message: str
 
+# cargar el PDF del hotel
+loader = PyPDFLoader("documents/hotel_info.pdf")
+documents = loader.load()
+
+text_splitter = CharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=50
+)
+
+texts = text_splitter.split_documents(documents)
+
+# unir el texto del pdf
+knowledge = " ".join([doc.page_content for doc in texts])
+
+
 @app.post("/")
 async def hotel_ai(data: Message):
-    text = data.message.lower()
 
-    if "precio" in text or "cuesta" in text:
-        return {"response": "Las habitaciones empiezan desde 120 dólares por noche."}
+    question = data.message.lower()
 
-    if "reservar" in text or "reserva" in text:
-        return {"response": "Claro, puedo ayudarte con tu reserva. ¿Para qué fecha deseas la habitación?"}
+    if question in knowledge.lower():
+        return {"response": "Según la información del hotel: " + knowledge[:400]}
 
-    if "servicios" in text:
-        return {"response": "El hotel tiene piscina, wifi gratis, restaurante y transporte al aeropuerto."}
-
-    return {"response": "Claro, con gusto te ayudo. ¿En qué puedo asistirte?"}
+    return {"response": "Déjame verificar esa información para ayudarte mejor."}
