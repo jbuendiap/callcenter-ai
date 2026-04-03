@@ -8,10 +8,12 @@ app = FastAPI()
 class Message(BaseModel):
     message: str
 
-# cargar el PDF del hotel
+
+# cargar el PDF
 loader = PyPDFLoader("documents/hotel_info.pdf")
 documents = loader.load()
 
+# dividir el texto
 text_splitter = CharacterTextSplitter(
     chunk_size=500,
     chunk_overlap=50
@@ -19,8 +21,8 @@ text_splitter = CharacterTextSplitter(
 
 texts = text_splitter.split_documents(documents)
 
-# unir el texto del pdf
-knowledge = " ".join([doc.page_content for doc in texts])
+# guardar conocimiento
+knowledge = " ".join([doc.page_content for doc in texts]).lower()
 
 
 @app.post("/")
@@ -28,7 +30,17 @@ async def hotel_ai(data: Message):
 
     question = data.message.lower()
 
-    if question in knowledge.lower():
-        return {"response": "Según la información del hotel: " + knowledge[:400]}
+    # ejemplos de respuestas inteligentes
+    if "precio" in question or "cuesta" in question:
+        return {"response": "Las habitaciones comienzan desde 120 dólares por noche."}
 
-    return {"response": "Déjame verificar esa información para ayudarte mejor."}
+    if "reservar" in question or "reserva" in question:
+        return {"response": "Claro, puedo ayudarte con tu reserva. ¿Para qué fecha deseas la habitación?"}
+
+    if "servicios" in question or "piscina" in question:
+        return {"response": "El hotel cuenta con piscina, wifi gratis, restaurante y transporte al aeropuerto."}
+
+    if question in knowledge:
+        return {"response": "Según la información del hotel: " + knowledge[:300]}
+
+    return {"response": "Con gusto te ayudo. ¿Podrías darme más detalles de tu consulta?"}
