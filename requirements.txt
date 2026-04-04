@@ -3,4 +3,5 @@ uvicorn
 pydantic
 langchain
 langchain-community
+langchain-text-splitters
 pypdf
