@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 app = FastAPI()
 
