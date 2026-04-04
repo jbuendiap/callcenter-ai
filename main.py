@@ -1,72 +1,61 @@
+import os
 from fastapi import FastAPI
 from pydantic import BaseModel
-import os
-
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import CharacterTextSplitter
-
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage
 
 app = FastAPI()
+
+# Configuración de la API Key (Debes ponerla en las variables de entorno de Railway)
+os.environ["OPENAI_API_KEY"] = "TU_API_KEY_AQUI"
 
 class Message(BaseModel):
     message: str
 
-vector_db = None
-llm = None
-
-PDF_PATH = os.path.join(os.getcwd(), "documents", "hotel_info.pdf")
-
+# Variable para guardar el texto del PDF
+hotel_knowledge = ""
 
 @app.on_event("startup")
-async def load_knowledge():
-
-    global vector_db
-    global llm
-
-    loader = PyPDFLoader(PDF_PATH)
-    documents = loader.load()
-
-    text_splitter = CharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
-    )
-
-    texts = text_splitter.split_documents(documents)
-
-    embeddings = OpenAIEmbeddings()
-
-    vector_db = FAISS.from_documents(texts, embeddings)
-
-    llm = ChatOpenAI(
-        temperature=0.2
-    )
-
-    print("✅ IA del hotel lista")
-
+async def load_pdf():
+    global hotel_knowledge
+    try:
+        path = os.path.join(os.getcwd(), "documents", "hotel_info.pdf")
+        loader = PyPDFLoader(path)
+        docs = loader.load()
+        # Unimos todo el contenido del PDF en una sola base de conocimientos
+        hotel_knowledge = "\n".join([doc.page_content for doc in docs])
+        print("✅ Información del hotel cargada.")
+    except Exception as e:
+        print(f"❌ Error cargando PDF: {e}")
 
 @app.post("/")
 async def hotel_ai(data: Message):
+    # Si no hay PDF, usamos una respuesta genérica
+    if not hotel_knowledge:
+        return {"response": "Lo siento, mi base de datos está en mantenimiento."}
 
-    question = data.message
+    # Llamamos a la IA (GPT-4o mini es rápido y económico)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
 
-    docs = vector_db.similarity_search(question, k=3)
+    # Creamos el "Prompt": Las instrucciones para la IA
+    messages = [
+        SystemMessage(content=f"""
+            Eres el asistente virtual inteligente de Whala! Bávaro. 
+            Tu objetivo es ser amable, servicial y natural.
+            
+            Usa EXCLUSIVAMENTE la siguiente información del hotel para responder:
+            {hotel_knowledge}
+            
+            Si el cliente pregunta algo que NO está en el texto, di que no tienes esa 
+            información y ofrécele contactar con un humano. 
+            No inventes datos. Usa un tono profesional pero cercano.
+        """),
+        HumanMessage(content=data.message)
+    ]
 
-    context = "\n".join([doc.page_content for doc in docs])
-
-    prompt = f"""
-Eres un asistente de hotel.
-
-Usa la siguiente información para responder al cliente:
-
-{context}
-
-Pregunta del cliente:
-{question}
-"""
-
-    response = llm.invoke(prompt)
-
-    return {"response": response.content}
+    try:
+        response = llm.invoke(messages)
+        return {"response": response.content}
+    except Exception as e:
+        return {"response": f"Hubo un error al procesar tu consulta: {e}"}
