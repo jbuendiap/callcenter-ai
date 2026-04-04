@@ -5,6 +5,6 @@ langchain
 langchain-community
 langchain-openai
 pypdf
-openai
 faiss-cpu
+openai
 tiktoken
