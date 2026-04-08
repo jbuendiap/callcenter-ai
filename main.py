@@ -50,6 +50,13 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS lead_scores (
+        user_id TEXT PRIMARY KEY,
+        score INTEGER
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -97,118 +104,130 @@ def get_history(user_id, limit=10):
 
     return history
 
-# ---------------- LEAD CLASSIFICATION ----------------
+# ---------------- LEAD SCORING ----------------
 
-def classify_lead(message: str):
+def get_score(user_id):
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT score FROM lead_scores WHERE user_id=?
+    """, (user_id,))
+
+    result = cursor.fetchone()
+
+    conn.close()
+
+    if result:
+        return result[0]
+
+    return 0
+
+
+def update_score(user_id, points):
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    current_score = get_score(user_id)
+
+    new_score = current_score + points
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO lead_scores (user_id, score)
+    VALUES (?, ?)
+    """, (user_id, new_score))
+
+    conn.commit()
+    conn.close()
+
+    return new_score
+
+
+def calculate_score(message):
 
     msg = message.lower()
 
-    hot_keywords = [
-        "reservar","reserva","disponibilidad",
-        "book","booking","reserve","confirmar"
-    ]
+    score = 0
 
-    warm_keywords = [
-        "precio","tarifa","cuanto cuesta",
-        "cost","rate","price"
-    ]
+    if "precio" in msg or "price" in msg:
+        score += 10
 
-    for word in hot_keywords:
-        if word in msg:
-            return "lead_caliente"
+    if "disponibilidad" in msg or "available" in msg:
+        score += 20
 
-    for word in warm_keywords:
-        if word in msg:
-            return "lead_interesado"
+    if "reservar" in msg or "booking" in msg:
+        score += 40
+
+    if "formas de pago" in msg or "payment" in msg:
+        score += 20
+
+    return score
+
+# ---------------- LEAD CLASSIFICATION ----------------
+
+def classify_lead(score):
+
+    if score >= 80:
+        return "lead_listo_para_comprar"
+
+    if score >= 50:
+        return "lead_caliente"
+
+    if score >= 20:
+        return "lead_interesado"
 
     return "lead_frio"
 
-# ---------------- BOOKING INTENT ----------------
-
-def detect_booking_intent(message: str):
-
-    msg = message.lower()
-
-    booking_keywords = [
-        "quiero reservar",
-        "reservar",
-        "hacer reserva",
-        "confirmar reserva",
-        "confirmar",
-        "book",
-        "booking",
-        "reserve",
-        "confirm booking"
-    ]
-
-    for word in booking_keywords:
-        if word in msg:
-            return True
-
-    return False
-
 # ---------------- INTENT DETECTION ----------------
 
-def detect_intent(message: str):
+def detect_intent(message):
 
     msg = message.lower()
 
     intents = {
-
-        "saludo": [
-            "hola","hello","hi",
-            "buenos dias","good morning"
-        ],
-
-        "precio": [
-            "precio","tarifa",
-            "cuanto cuesta","price","rate"
-        ],
-
-        "disponibilidad": [
-            "disponibilidad",
-            "available","availability"
-        ],
-
-        "reserva": [
-            "reservar","reserva",
-            "book","booking"
-        ],
-
-        "objecion": [
-            "caro","expensive",
-            "muy caro","too expensive"
-        ],
-
-        "comparacion": [
-            "mejor que",
-            "difference",
-            "compare"
-        ],
-
-        "cliente_listo": [
-            "quiero reservar",
-            "confirmar reserva",
-            "book now"
-        ],
-
-        "despedida": [
-            "gracias",
-            "thank you",
-            "bye"
-        ]
+        "saludo": ["hola", "hello", "hi"],
+        "precio": ["precio", "price", "rate"],
+        "disponibilidad": ["disponibilidad", "available"],
+        "reserva": ["reservar", "booking"],
+        "objecion": ["caro", "expensive"],
+        "comparacion": ["mejor que", "compare"],
+        "cliente_listo": ["quiero reservar", "confirmar reserva"],
+        "despedida": ["gracias", "bye"]
     }
 
-    for intent, keywords in intents.items():
+    for intent, words in intents.items():
 
-        for word in keywords:
+        for word in words:
 
             if word in msg:
                 return intent
 
     return "informacion"
 
-# ---------------- LANGUAGE DETECTION ----------------
+# ---------------- BOOKING INTENT ----------------
+
+def detect_booking_intent(message):
+
+    msg = message.lower()
+
+    keywords = [
+        "quiero reservar",
+        "reservar",
+        "confirmar reserva",
+        "book",
+        "booking"
+    ]
+
+    for word in keywords:
+
+        if word in msg:
+            return True
+
+    return False
+
+# ---------------- LANGUAGE ----------------
 
 def detect_language(text):
 
@@ -267,8 +286,6 @@ def build_index():
 
             vector_db.save_local(INDEX_FILE)
 
-            logging.info("Index created")
-
     except Exception as e:
 
         logging.error(f"Index error: {e}")
@@ -286,7 +303,7 @@ async def startup_event():
         daemon=True
     ).start()
 
-# ---------------- CHAT ENDPOINT ----------------
+# ---------------- CHAT ----------------
 
 @app.post("/chat")
 async def chat(data: Message):
@@ -301,11 +318,15 @@ async def chat(data: Message):
 
         language = detect_language(data.message)
 
-        lead_type = classify_lead(data.message)
-
         intent = detect_intent(data.message)
 
         booking_intent = detect_booking_intent(data.message)
+
+        points = calculate_score(data.message)
+
+        score = update_score(data.user_id, points)
+
+        lead_type = classify_lead(score)
 
         save_message(data.user_id, "user", data.message)
 
@@ -333,9 +354,11 @@ Responde utilizando únicamente la información disponible en los documentos.
 
 Idioma del usuario: {language}
 
-Intención del cliente detectada: {intent}
-
 Tipo de lead: {lead_type}
+
+Score del cliente: {score}
+
+Intención detectada: {intent}
 
 Si no encuentras la información en los documentos responde exactamente:
 
@@ -347,21 +370,19 @@ Información disponible:
 
 """
 
-        if booking_intent:
+        if score >= 80 or booking_intent:
 
             system_prompt += """
 
 El cliente parece listo para realizar una reserva.
 
-Debes ayudarle a completar la reserva solicitando:
+Guía al cliente para completar la reserva solicitando:
 
 - Nombre completo
 - Fecha de llegada
 - Fecha de salida
 - Cantidad de personas
 - Correo electrónico o teléfono
-
-Guía al cliente para completar la reserva.
 
 """
 
@@ -386,6 +407,7 @@ Guía al cliente para completar la reserva.
         return {
 
             "response": response.content,
+            "score": score,
             "lead_type": lead_type,
             "intent": intent,
             "booking_intent": booking_intent,
@@ -402,7 +424,7 @@ Guía al cliente para completar la reserva.
             detail="Error procesando solicitud"
         )
 
-# ---------------- UPDATE INDEX ----------------
+# ---------------- REBUILD INDEX ----------------
 
 @app.post("/update-index")
 async def update_index():
