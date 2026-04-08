@@ -1,6 +1,6 @@
 import os
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Dict
 import threading
@@ -12,7 +12,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="AI Call Center")
 
@@ -20,185 +20,166 @@ class Message(BaseModel):
     user_id: str
     message: str
 
-INDEX_FILE = "faiss_index"
-DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
 
-vector_db = None
+DOCUMENTS_DIR = "documents"
+
+INFO_INDEX = "info_index"
+QUESTIONS_INDEX = "questions_index"
+
+info_db = None
+questions_db = None
+
 index_lock = threading.Lock()
 
 conversation_histories: Dict[str, List[Dict]] = {}
 
-# Modelo IA
 llm = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0.4
 )
 
 
-def build_index():
+def load_pdfs(folder):
 
-    global vector_db
+    docs = []
+
+    for filename in os.listdir(folder):
+
+        if filename.lower().endswith(".pdf"):
+
+            loader = PyPDFLoader(os.path.join(folder, filename))
+
+            docs.extend(loader.load())
+
+    return docs
+
+
+def build_indexes():
+
+    global info_db, questions_db
+
+    embeddings = OpenAIEmbeddings()
 
     try:
 
-        embeddings = OpenAIEmbeddings()
+        # índice de información
 
-        if os.path.exists(INDEX_FILE):
+        info_docs = load_pdfs(os.path.join(DOCUMENTS_DIR, "info"))
 
-            logging.info("Cargando índice FAISS")
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=800,
+            chunk_overlap=100
+        )
 
-            vector_db = FAISS.load_local(
-                INDEX_FILE,
-                embeddings,
-                allow_dangerous_deserialization=True
-            )
+        info_chunks = splitter.split_documents(info_docs)
 
-        else:
+        info_db = FAISS.from_documents(info_chunks, embeddings)
 
-            logging.info("Creando índice desde documentos")
+        info_db.save_local(INFO_INDEX)
 
-            docs = []
+        # índice de preguntas
 
-            if not os.path.exists(DOCUMENTS_DIR):
-                os.makedirs(DOCUMENTS_DIR)
+        questions_docs = load_pdfs(os.path.join(DOCUMENTS_DIR, "questions"))
 
-            for filename in os.listdir(DOCUMENTS_DIR):
+        questions_chunks = splitter.split_documents(questions_docs)
 
-                if filename.lower().endswith(".pdf"):
+        questions_db = FAISS.from_documents(questions_chunks, embeddings)
 
-                    loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, filename))
-                    docs.extend(loader.load())
+        questions_db.save_local(QUESTIONS_INDEX)
 
-            if not docs:
-
-                logging.warning("No se encontraron PDFs")
-
-                vector_db = None
-                return
-
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=800,
-                chunk_overlap=100
-            )
-
-            chunks = splitter.split_documents(docs)
-
-            vector_db = FAISS.from_documents(chunks, embeddings)
-
-            vector_db.save_local(INDEX_FILE)
-
-            logging.info("Índice creado correctamente")
+        logging.info("Indexes created successfully")
 
     except Exception as e:
 
-        logging.error(f"Error creando índice: {e}")
-
-        vector_db = None
+        logging.error(e)
 
 
 @app.on_event("startup")
-async def startup_event():
+async def startup():
 
-    threading.Thread(target=build_index, daemon=True).start()
+    threading.Thread(target=build_indexes, daemon=True).start()
 
 
 @app.post("/chat")
 async def chat(data: Message):
 
-    if vector_db is None:
+    if info_db is None:
+
         return {"response": "Loading information, please try again shortly."}
 
-    try:
+    with index_lock:
 
-        with index_lock:
+        info_docs = info_db.similarity_search(data.message, k=3)
 
-            docs = vector_db.similarity_search(data.message, k=3)
+        question_docs = questions_db.similarity_search(data.message, k=2)
 
-        if not docs:
+    info_context = "\n\n".join([doc.page_content for doc in info_docs])
 
-            return {"response": "Esta información la consultaré y le responderé en la brevedad."}
+    question_context = "\n\n".join([doc.page_content for doc in question_docs])
 
-        context = "\n\n".join([doc.page_content for doc in docs])
+    if data.user_id not in conversation_histories:
 
-        if data.user_id not in conversation_histories:
+        conversation_histories[data.user_id] = []
 
-            conversation_histories[data.user_id] = []
+    conversation_histories[data.user_id].append({
+        "role": "user",
+        "content": data.message
+    })
 
-        conversation_histories[data.user_id].append({
-            "role": "user",
-            "content": data.message
-        })
+    history = conversation_histories[data.user_id][-6:]
 
-        history = conversation_histories[data.user_id][-6:]
+    chat_history = []
 
-        chat_history = []
+    for msg in history:
 
-        for msg in history:
+        if msg["role"] == "user":
 
-            if msg["role"] == "user":
-                chat_history.append(HumanMessage(content=msg["content"]))
+            chat_history.append(HumanMessage(content=msg["content"]))
 
-            elif msg["role"] == "assistant":
-                chat_history.append(AIMessage(content=msg["content"]))
+        else:
 
-        messages = [
+            chat_history.append(AIMessage(content=msg["content"]))
 
-            SystemMessage(content=(
-                "Detect the language of the user automatically and respond in the same language.\n"
-                "Use only the information provided in the context documents.\n"
-                "Be clear, professional and concise.\n"
-                "If the information is not available respond:\n"
-                "'Esta información la consultaré y le responderé en la brevedad.'"
-            )),
+    messages = [
 
-            *chat_history,
+        SystemMessage(content="""
+Detect the user's language and respond in the same language.
 
-            HumanMessage(content=f"""
-Context information:
-{context}
+Use the information from the hotel documents to answer questions.
 
-User question:
+Use the question flow document to guide the conversation and ask relevant questions.
+
+If the information is not available respond:
+"Esta información la consultaré y le responderé en la brevedad."
+"""),
+
+        *chat_history,
+
+        HumanMessage(content=f"""
+Hotel information:
+{info_context}
+
+Question flow:
+{question_context}
+
+User message:
 {data.message}
 """)
 
-        ]
+    ]
 
-        response = llm.invoke(messages)
+    response = llm.invoke(messages)
 
-        conversation_histories[data.user_id].append({
-            "role": "assistant",
-            "content": response.content
-        })
+    conversation_histories[data.user_id].append({
+        "role": "assistant",
+        "content": response.content
+    })
 
-        return {"response": response.content}
-
-    except Exception as e:
-
-        logging.error(f"Error en chat: {e}")
-
-        raise HTTPException(status_code=500, detail="Error procesando la solicitud")
-
-
-@app.post("/update-index")
-async def update_index():
-
-    threading.Thread(target=build_index, daemon=True).start()
-
-    return {"response": "Index rebuilding started."}
-
-
-@app.get("/history/{user_id}")
-async def get_history(user_id: str):
-
-    return conversation_histories.get(user_id, [])
+    return {"response": response.content}
 
 
 if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8000))
 
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port
-    )
+    uvicorn.run(app, host="0.0.0.0", port=port)
