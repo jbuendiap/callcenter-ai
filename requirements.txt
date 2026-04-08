@@ -2,11 +2,11 @@ fastapi
 uvicorn
 pydantic
 langchain
-langchain-core
 langchain-community
 langchain-openai
-langchain-text-splitters
+pypdf
+faiss-cpu
 openai
 tiktoken
-faiss-cpu
-pypdf
+langdetect
+sqlite-utils
