@@ -4,6 +4,8 @@ pydantic
 langchain
 langchain-community
 langchain-openai
+langchain-text-splitters
+langchain-core
 pypdf
 faiss-cpu
 openai
