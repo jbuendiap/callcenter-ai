@@ -12,7 +12,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-# Configuración de logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 app = FastAPI(title="AI Call Center")
@@ -29,21 +28,24 @@ index_lock = threading.Lock()
 
 conversation_histories: Dict[str, List[Dict]] = {}
 
-# Crear modelo una sola vez
+# Modelo IA
 llm = ChatOpenAI(
     model="gpt-4o-mini",
-    temperature=0.5
+    temperature=0.4
 )
 
+
 def build_index():
+
     global vector_db
+
     try:
 
         embeddings = OpenAIEmbeddings()
 
         if os.path.exists(INDEX_FILE):
 
-            logging.info("Cargando índice FAISS existente")
+            logging.info("Cargando índice FAISS")
 
             vector_db = FAISS.load_local(
                 INDEX_FILE,
@@ -69,7 +71,7 @@ def build_index():
 
             if not docs:
 
-                logging.warning("No se encontraron documentos")
+                logging.warning("No se encontraron PDFs")
 
                 vector_db = None
                 return
@@ -104,8 +106,7 @@ async def startup_event():
 async def chat(data: Message):
 
     if vector_db is None:
-
-        return {"response": "La información aún se está cargando."}
+        return {"response": "Loading information, please try again shortly."}
 
     try:
 
@@ -135,24 +136,30 @@ async def chat(data: Message):
         for msg in history:
 
             if msg["role"] == "user":
-
                 chat_history.append(HumanMessage(content=msg["content"]))
 
             elif msg["role"] == "assistant":
-
                 chat_history.append(AIMessage(content=msg["content"]))
 
         messages = [
 
             SystemMessage(content=(
-                "Responde utilizando únicamente la información proporcionada en los documentos."
-                "Si la información no está disponible responde:"
+                "Detect the language of the user automatically and respond in the same language.\n"
+                "Use only the information provided in the context documents.\n"
+                "Be clear, professional and concise.\n"
+                "If the information is not available respond:\n"
                 "'Esta información la consultaré y le responderé en la brevedad.'"
             )),
 
             *chat_history,
 
-            HumanMessage(content=f"Información relevante:\n{context}\n\nPregunta:\n{data.message}")
+            HumanMessage(content=f"""
+Context information:
+{context}
+
+User question:
+{data.message}
+""")
 
         ]
 
@@ -177,7 +184,7 @@ async def update_index():
 
     threading.Thread(target=build_index, daemon=True).start()
 
-    return {"response": "Reconstrucción del índice iniciada."}
+    return {"response": "Index rebuilding started."}
 
 
 @app.get("/history/{user_id}")
