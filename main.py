@@ -1,38 +1,144 @@
 import os
 import uvicorn
+import sqlite3
+import logging
+import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict
-import threading
-import logging
+from typing import List
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+from langdetect import detect
+
+# ---------------- CONFIG ----------------
+
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="AI Call Center")
+
+INDEX_FILE = "hotel_faiss_index"
+DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
+DATABASE = "memory.db"
+
+vector_db = None
+index_lock = threading.Lock()
+
+# ---------------- MODELS ----------------
 
 class Message(BaseModel):
     user_id: str
     message: str
 
-INDEX_FILE = "hotel_faiss_index"
-DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
+# ---------------- DATABASE ----------------
 
-vector_db = None
-index_lock = threading.Lock()
+def init_db():
 
-conversation_histories: Dict[str, List] = {}
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
 
-MAX_HISTORY = 10
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        role TEXT,
+        message TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
-# -------------------------
-# Crear índice FAISS
-# -------------------------
+    conn.commit()
+    conn.close()
+
+def save_message(user_id, role, message):
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO conversations (user_id, role, message)
+    VALUES (?, ?, ?)
+    """, (user_id, role, message))
+
+    conn.commit()
+    conn.close()
+
+def get_history(user_id, limit=10):
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT role, message
+    FROM conversations
+    WHERE user_id=?
+    ORDER BY id DESC
+    LIMIT ?
+    """, (user_id, limit))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    rows.reverse()
+
+    history = []
+    for role, message in rows:
+        if role == "user":
+            history.append(HumanMessage(content=message))
+        else:
+            history.append(SystemMessage(content=message))
+
+    return history
+
+# ---------------- LEAD CLASSIFICATION ----------------
+
+def classify_lead(message: str):
+
+    msg = message.lower()
+
+    hot_keywords = [
+        "reservar",
+        "reserva",
+        "disponibilidad",
+        "book",
+        "booking",
+        "reserve",
+        "confirmar"
+    ]
+
+    warm_keywords = [
+        "precio",
+        "tarifa",
+        "cuanto cuesta",
+        "cost",
+        "rate",
+        "price"
+    ]
+
+    for word in hot_keywords:
+        if word in msg:
+            return "lead_caliente"
+
+    for word in warm_keywords:
+        if word in msg:
+            return "lead_interesado"
+
+    return "lead_frio"
+
+# ---------------- LANGUAGE DETECTION ----------------
+
+def detect_language(text):
+
+    try:
+        return detect(text)
+    except:
+        return "es"
+
+# ---------------- VECTOR DATABASE ----------------
 
 def build_index():
 
@@ -44,8 +150,7 @@ def build_index():
 
         if os.path.exists(INDEX_FILE):
 
-            logging.info("Cargando índice FAISS existente")
-
+            logging.info("Loading FAISS index")
             vector_db = FAISS.load_local(
                 INDEX_FILE,
                 embeddings,
@@ -54,25 +159,19 @@ def build_index():
 
         else:
 
-            logging.info("Creando índice FAISS desde PDFs")
+            logging.info("Building FAISS index")
 
             docs = []
 
-            for filename in os.listdir(DOCUMENTS_DIR):
+            for file in os.listdir(DOCUMENTS_DIR):
 
-                if filename.lower().endswith(".pdf"):
+                if file.endswith(".pdf"):
 
                     loader = PyPDFLoader(
-                        os.path.join(DOCUMENTS_DIR, filename)
+                        os.path.join(DOCUMENTS_DIR, file)
                     )
 
                     docs.extend(loader.load())
-
-            if not docs:
-
-                logging.warning("No se encontraron PDFs")
-                vector_db = None
-                return
 
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=800,
@@ -85,216 +184,112 @@ def build_index():
 
             vector_db.save_local(INDEX_FILE)
 
-            logging.info("Índice FAISS creado")
+            logging.info("Index created")
 
     except Exception as e:
 
-        logging.error(f"Error creando índice: {e}")
+        logging.error(f"Index error: {e}")
         vector_db = None
 
+# ---------------- STARTUP ----------------
 
 @app.on_event("startup")
 async def startup_event():
+
+    init_db()
 
     threading.Thread(
         target=build_index,
         daemon=True
     ).start()
 
-
-# -------------------------
-# Detectar idioma
-# -------------------------
-
-def detect_language(message):
-
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0
-    )
-
-    messages = [
-
-        SystemMessage(content="""
-Detect the language of the message.
-
-Return ONLY the language name.
-
-Example:
-English
-Spanish
-French
-German
-Portuguese
-"""),
-
-        HumanMessage(content=message)
-    ]
-
-    response = llm.invoke(messages)
-
-    return response.content.strip()
-
-
-# -------------------------
-# Detectar intención
-# -------------------------
-
-def detect_intent(message):
-
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0
-    )
-
-    messages = [
-
-        SystemMessage(content="""
-Classify the customer intention.
-
-Return ONLY one word from:
-
-reservation
-information
-objection
-comparison
-complaint
-agent
-other
-"""),
-
-        HumanMessage(content=message)
-    ]
-
-    response = llm.invoke(messages)
-
-    return response.content.strip().lower()
-
-
-# -------------------------
-# Chat principal
-# -------------------------
+# ---------------- CHAT ENDPOINT ----------------
 
 @app.post("/chat")
-
 async def chat(data: Message):
 
     if vector_db is None:
 
         return {
-            "response": "Estoy cargando la información. Intenta nuevamente en unos segundos."
+            "response": "Estoy cargando la información. Intente nuevamente en unos segundos."
         }
 
     try:
 
         language = detect_language(data.message)
 
-        intent = detect_intent(data.message)
+        lead_type = classify_lead(data.message)
+
+        save_message(data.user_id, "user", data.message)
+
+        history = get_history(data.user_id)
 
         with index_lock:
 
             docs = vector_db.similarity_search(
                 data.message,
-                k=3
+                k=5
             )
 
         context = "\n\n".join(
             [doc.page_content for doc in docs]
         )
 
-        if data.user_id not in conversation_histories:
-
-            conversation_histories[data.user_id] = []
-
-        history = conversation_histories[data.user_id]
-
-        history.append(
-            HumanMessage(content=data.message)
-        )
-
-        if len(history) > MAX_HISTORY:
-
-            history = history[-MAX_HISTORY:]
-
-            conversation_histories[data.user_id] = history
-
         llm = ChatOpenAI(
             model="gpt-4o-mini",
-            temperature=0.5
+            temperature=0.4
         )
-
-        system_prompt = f"""
-You are a professional hotel call center sales agent.
-
-Customer language: {language}
-
-Customer intent: {intent}
-
-Use ONLY information from documents.
-
-Context:
-{context}
-
-If the answer is not in the documents say:
-
-"Esta información la consultare y le respondere en la brevedad."
-
-Be professional, friendly and helpful.
-"""
 
         messages = [
 
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=f"""
 
-            *history
+Responde utilizando únicamente la información disponible en los documentos.
+
+Idioma del usuario: {language}
+
+Si no encuentras la información en los documentos responde exactamente:
+
+"Esta información la consultaré y le responderé en la brevedad."
+
+Información disponible:
+
+{context}
+
+""")
 
         ]
 
+        messages.extend(history)
+
+        messages.append(
+            HumanMessage(content=data.message)
+        )
+
         response = llm.invoke(messages)
 
-        history.append(
-            AIMessage(content=response.content)
-        )
+        save_message(data.user_id, "assistant", response.content)
 
         return {
 
-            "language_detected": language,
-
-            "intent_detected": intent,
-
-            "response": response.content
+            "response": response.content,
+            "lead_type": lead_type,
+            "language": language
 
         }
 
     except Exception as e:
 
-        logging.error(f"Error en chat: {e}")
+        logging.error(f"Error: {e}")
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail="Error procesando solicitud"
         )
 
-
-# -------------------------
-# Historial
-# -------------------------
-
-@app.get("/history/{user_id}")
-
-async def get_history(user_id: str):
-
-    history = conversation_histories.get(user_id, [])
-
-    return [msg.content for msg in history]
-
-
-# -------------------------
-# Actualizar índice
-# -------------------------
+# ---------------- REBUILD INDEX ----------------
 
 @app.post("/update-index")
-
 async def update_index():
 
     threading.Thread(
@@ -303,13 +298,34 @@ async def update_index():
     ).start()
 
     return {
-        "response": "Reconstrucción del índice iniciada"
+        "message": "Index rebuilding"
     }
 
+# ---------------- HISTORY ----------------
 
-# -------------------------
-# Run
-# -------------------------
+@app.get("/history/{user_id}")
+async def history(user_id: str):
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+
+    SELECT role, message, timestamp
+    FROM conversations
+    WHERE user_id=?
+    ORDER BY id DESC
+    LIMIT 20
+
+    """, (user_id,))
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    return rows
+
+# ---------------- MAIN ----------------
 
 if __name__ == "__main__":
 
