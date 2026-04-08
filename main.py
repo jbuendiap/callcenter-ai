@@ -5,7 +5,6 @@ import logging
 import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -105,22 +104,13 @@ def classify_lead(message: str):
     msg = message.lower()
 
     hot_keywords = [
-        "reservar",
-        "reserva",
-        "disponibilidad",
-        "book",
-        "booking",
-        "reserve",
-        "confirmar"
+        "reservar","reserva","disponibilidad",
+        "book","booking","reserve","confirmar"
     ]
 
     warm_keywords = [
-        "precio",
-        "tarifa",
-        "cuanto cuesta",
-        "cost",
-        "rate",
-        "price"
+        "precio","tarifa","cuanto cuesta",
+        "cost","rate","price"
     ]
 
     for word in hot_keywords:
@@ -148,8 +138,7 @@ def detect_booking_intent(message: str):
         "book",
         "booking",
         "reserve",
-        "confirm booking",
-        "how to book"
+        "confirm booking"
     ]
 
     for word in booking_keywords:
@@ -157,6 +146,67 @@ def detect_booking_intent(message: str):
             return True
 
     return False
+
+# ---------------- INTENT DETECTION ----------------
+
+def detect_intent(message: str):
+
+    msg = message.lower()
+
+    intents = {
+
+        "saludo": [
+            "hola","hello","hi",
+            "buenos dias","good morning"
+        ],
+
+        "precio": [
+            "precio","tarifa",
+            "cuanto cuesta","price","rate"
+        ],
+
+        "disponibilidad": [
+            "disponibilidad",
+            "available","availability"
+        ],
+
+        "reserva": [
+            "reservar","reserva",
+            "book","booking"
+        ],
+
+        "objecion": [
+            "caro","expensive",
+            "muy caro","too expensive"
+        ],
+
+        "comparacion": [
+            "mejor que",
+            "difference",
+            "compare"
+        ],
+
+        "cliente_listo": [
+            "quiero reservar",
+            "confirmar reserva",
+            "book now"
+        ],
+
+        "despedida": [
+            "gracias",
+            "thank you",
+            "bye"
+        ]
+    }
+
+    for intent, keywords in intents.items():
+
+        for word in keywords:
+
+            if word in msg:
+                return intent
+
+    return "informacion"
 
 # ---------------- LANGUAGE DETECTION ----------------
 
@@ -253,6 +303,8 @@ async def chat(data: Message):
 
         lead_type = classify_lead(data.message)
 
+        intent = detect_intent(data.message)
+
         booking_intent = detect_booking_intent(data.message)
 
         save_message(data.user_id, "user", data.message)
@@ -281,6 +333,10 @@ Responde utilizando únicamente la información disponible en los documentos.
 
 Idioma del usuario: {language}
 
+Intención del cliente detectada: {intent}
+
+Tipo de lead: {lead_type}
+
 Si no encuentras la información en los documentos responde exactamente:
 
 "Esta información la consultaré y le responderé en la brevedad."
@@ -297,7 +353,7 @@ Información disponible:
 
 El cliente parece listo para realizar una reserva.
 
-Debes ayudarle a completar la reserva solicitando los siguientes datos:
+Debes ayudarle a completar la reserva solicitando:
 
 - Nombre completo
 - Fecha de llegada
@@ -331,6 +387,7 @@ Guía al cliente para completar la reserva.
 
             "response": response.content,
             "lead_type": lead_type,
+            "intent": intent,
             "booking_intent": booking_intent,
             "language": language
 
@@ -345,7 +402,7 @@ Guía al cliente para completar la reserva.
             detail="Error procesando solicitud"
         )
 
-# ---------------- REBUILD INDEX ----------------
+# ---------------- UPDATE INDEX ----------------
 
 @app.post("/update-index")
 async def update_index():
