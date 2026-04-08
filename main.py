@@ -10,11 +10,11 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-app = FastAPI(title="AI Call Center Multilenguaje")
+app = FastAPI(title="AI Call Center")
 
 class Message(BaseModel):
     user_id: str
@@ -25,20 +25,27 @@ DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
 
 vector_db = None
 index_lock = threading.Lock()
-conversation_histories: Dict[str, List[Dict]] = {}
+
+conversation_histories: Dict[str, List] = {}
+
+MAX_HISTORY = 10
 
 # -------------------------
-# Construcción del índice
+# Crear índice FAISS
 # -------------------------
 
 def build_index():
+
     global vector_db
 
     try:
+
         embeddings = OpenAIEmbeddings()
 
         if os.path.exists(INDEX_FILE):
+
             logging.info("Cargando índice FAISS existente")
+
             vector_db = FAISS.load_local(
                 INDEX_FILE,
                 embeddings,
@@ -46,6 +53,7 @@ def build_index():
             )
 
         else:
+
             logging.info("Creando índice FAISS desde PDFs")
 
             docs = []
@@ -61,6 +69,7 @@ def build_index():
                     docs.extend(loader.load())
 
             if not docs:
+
                 logging.warning("No se encontraron PDFs")
                 vector_db = None
                 return
@@ -79,6 +88,7 @@ def build_index():
             logging.info("Índice FAISS creado")
 
     except Exception as e:
+
         logging.error(f"Error creando índice: {e}")
         vector_db = None
 
@@ -90,6 +100,7 @@ async def startup_event():
         target=build_index,
         daemon=True
     ).start()
+
 
 # -------------------------
 # Detectar idioma
@@ -105,13 +116,13 @@ def detect_language(message):
     messages = [
 
         SystemMessage(content="""
-Detecta el idioma del siguiente mensaje.
+Detect the language of the message.
 
-Responde SOLO con el nombre del idioma en inglés.
+Return ONLY the language name.
 
-Ejemplos:
-Spanish
+Example:
 English
+Spanish
 French
 German
 Portuguese
@@ -139,9 +150,9 @@ def detect_intent(message):
     messages = [
 
         SystemMessage(content="""
-Clasifica la intención del mensaje.
+Classify the customer intention.
 
-Responde SOLO con una palabra de esta lista:
+Return ONLY one word from:
 
 reservation
 information
@@ -195,12 +206,17 @@ async def chat(data: Message):
 
             conversation_histories[data.user_id] = []
 
-        conversation_histories[data.user_id].append(
-            {
-                "role": "user",
-                "content": data.message
-            }
+        history = conversation_histories[data.user_id]
+
+        history.append(
+            HumanMessage(content=data.message)
         )
+
+        if len(history) > MAX_HISTORY:
+
+            history = history[-MAX_HISTORY:]
+
+            conversation_histories[data.user_id] = history
 
         llm = ChatOpenAI(
             model="gpt-4o-mini",
@@ -208,40 +224,36 @@ async def chat(data: Message):
         )
 
         system_prompt = f"""
-You are a professional hotel call center agent.
+You are a professional hotel call center sales agent.
 
 Customer language: {language}
 
 Customer intent: {intent}
 
-Use ONLY the information from the documents.
+Use ONLY information from documents.
 
 Context:
 {context}
 
-If you do not find the answer in the documents say:
+If the answer is not in the documents say:
 
 "Esta información la consultare y le respondere en la brevedad."
 
-Respond in the same language as the customer.
-Be helpful, professional and friendly.
+Be professional, friendly and helpful.
 """
 
         messages = [
 
             SystemMessage(content=system_prompt),
 
-            HumanMessage(content=data.message)
+            *history
 
         ]
 
         response = llm.invoke(messages)
 
-        conversation_histories[data.user_id].append(
-            {
-                "role": "assistant",
-                "content": response.content
-            }
+        history.append(
+            AIMessage(content=response.content)
         )
 
         return {
@@ -272,11 +284,13 @@ Be helpful, professional and friendly.
 
 async def get_history(user_id: str):
 
-    return conversation_histories.get(user_id, [])
+    history = conversation_histories.get(user_id, [])
+
+    return [msg.content for msg in history]
 
 
 # -------------------------
-# Reconstruir índice
+# Actualizar índice
 # -------------------------
 
 @app.post("/update-index")
