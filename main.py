@@ -54,6 +54,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def save_message(user_id, role, message):
 
     conn = sqlite3.connect(DATABASE)
@@ -66,6 +67,7 @@ def save_message(user_id, role, message):
 
     conn.commit()
     conn.close()
+
 
 def get_history(user_id, limit=10):
 
@@ -86,7 +88,9 @@ def get_history(user_id, limit=10):
     rows.reverse()
 
     history = []
+
     for role, message in rows:
+
         if role == "user":
             history.append(HumanMessage(content=message))
         else:
@@ -129,6 +133,31 @@ def classify_lead(message: str):
 
     return "lead_frio"
 
+# ---------------- BOOKING INTENT ----------------
+
+def detect_booking_intent(message: str):
+
+    msg = message.lower()
+
+    booking_keywords = [
+        "quiero reservar",
+        "reservar",
+        "hacer reserva",
+        "confirmar reserva",
+        "confirmar",
+        "book",
+        "booking",
+        "reserve",
+        "confirm booking",
+        "how to book"
+    ]
+
+    for word in booking_keywords:
+        if word in msg:
+            return True
+
+    return False
+
 # ---------------- LANGUAGE DETECTION ----------------
 
 def detect_language(text):
@@ -151,6 +180,7 @@ def build_index():
         if os.path.exists(INDEX_FILE):
 
             logging.info("Loading FAISS index")
+
             vector_db = FAISS.load_local(
                 INDEX_FILE,
                 embeddings,
@@ -180,7 +210,10 @@ def build_index():
 
             chunks = splitter.split_documents(docs)
 
-            vector_db = FAISS.from_documents(chunks, embeddings)
+            vector_db = FAISS.from_documents(
+                chunks,
+                embeddings
+            )
 
             vector_db.save_local(INDEX_FILE)
 
@@ -220,6 +253,8 @@ async def chat(data: Message):
 
         lead_type = classify_lead(data.message)
 
+        booking_intent = detect_booking_intent(data.message)
+
         save_message(data.user_id, "user", data.message)
 
         history = get_history(data.user_id)
@@ -240,9 +275,7 @@ async def chat(data: Message):
             temperature=0.4
         )
 
-        messages = [
-
-            SystemMessage(content=f"""
+        system_prompt = f"""
 
 Responde utilizando únicamente la información disponible en los documentos.
 
@@ -256,8 +289,28 @@ Información disponible:
 
 {context}
 
-""")
+"""
 
+        if booking_intent:
+
+            system_prompt += """
+
+El cliente parece listo para realizar una reserva.
+
+Debes ayudarle a completar la reserva solicitando los siguientes datos:
+
+- Nombre completo
+- Fecha de llegada
+- Fecha de salida
+- Cantidad de personas
+- Correo electrónico o teléfono
+
+Guía al cliente para completar la reserva.
+
+"""
+
+        messages = [
+            SystemMessage(content=system_prompt)
         ]
 
         messages.extend(history)
@@ -268,12 +321,17 @@ Información disponible:
 
         response = llm.invoke(messages)
 
-        save_message(data.user_id, "assistant", response.content)
+        save_message(
+            data.user_id,
+            "assistant",
+            response.content
+        )
 
         return {
 
             "response": response.content,
             "lead_type": lead_type,
+            "booking_intent": booking_intent,
             "language": language
 
         }
