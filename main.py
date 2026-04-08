@@ -14,7 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-app = FastAPI(title="AI Call Center")
+app = FastAPI(title="AI Call Center Multilenguaje")
 
 class Message(BaseModel):
     user_id: str
@@ -61,7 +61,6 @@ def build_index():
                     docs.extend(loader.load())
 
             if not docs:
-
                 logging.warning("No se encontraron PDFs")
                 vector_db = None
                 return
@@ -80,7 +79,6 @@ def build_index():
             logging.info("Índice FAISS creado")
 
     except Exception as e:
-
         logging.error(f"Error creando índice: {e}")
         vector_db = None
 
@@ -92,6 +90,40 @@ async def startup_event():
         target=build_index,
         daemon=True
     ).start()
+
+# -------------------------
+# Detectar idioma
+# -------------------------
+
+def detect_language(message):
+
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0
+    )
+
+    messages = [
+
+        SystemMessage(content="""
+Detecta el idioma del siguiente mensaje.
+
+Responde SOLO con el nombre del idioma en inglés.
+
+Ejemplos:
+Spanish
+English
+French
+German
+Portuguese
+"""),
+
+        HumanMessage(content=message)
+    ]
+
+    response = llm.invoke(messages)
+
+    return response.content.strip()
+
 
 # -------------------------
 # Detectar intención
@@ -107,17 +139,17 @@ def detect_intent(message):
     messages = [
 
         SystemMessage(content="""
-Clasifica la intención del siguiente mensaje de un cliente.
+Clasifica la intención del mensaje.
 
 Responde SOLO con una palabra de esta lista:
 
-reserva
-informacion
-objecion
-comparacion
-queja
-agente
-otro
+reservation
+information
+objection
+comparison
+complaint
+agent
+other
 """),
 
         HumanMessage(content=message)
@@ -129,7 +161,7 @@ otro
 
 
 # -------------------------
-# Endpoint principal
+# Chat principal
 # -------------------------
 
 @app.post("/chat")
@@ -143,6 +175,8 @@ async def chat(data: Message):
         }
 
     try:
+
+        language = detect_language(data.message)
 
         intent = detect_intent(data.message)
 
@@ -174,19 +208,23 @@ async def chat(data: Message):
         )
 
         system_prompt = f"""
-Usa únicamente la información encontrada en los documentos.
+You are a professional hotel call center agent.
 
-Contexto encontrado:
+Customer language: {language}
+
+Customer intent: {intent}
+
+Use ONLY the information from the documents.
+
+Context:
 {context}
 
-La intención del cliente es: {intent}
-
-Si no encuentras información suficiente en los documentos
-responde:
+If you do not find the answer in the documents say:
 
 "Esta información la consultare y le respondere en la brevedad."
 
-Responde de forma clara, profesional y amable.
+Respond in the same language as the customer.
+Be helpful, professional and friendly.
 """
 
         messages = [
@@ -207,6 +245,8 @@ Responde de forma clara, profesional y amable.
         )
 
         return {
+
+            "language_detected": language,
 
             "intent_detected": intent,
 
@@ -236,7 +276,7 @@ async def get_history(user_id: str):
 
 
 # -------------------------
-# Actualizar índice
+# Reconstruir índice
 # -------------------------
 
 @app.post("/update-index")
