@@ -14,8 +14,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from langdetect import detect
 
-# ---------------- CONFIG ----------------
-
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="AI Call Center")
@@ -27,11 +25,13 @@ DATABASE = "memory.db"
 vector_db = None
 index_lock = threading.Lock()
 
+
 # ---------------- MODELS ----------------
 
 class Message(BaseModel):
     user_id: str
     message: str
+
 
 # ---------------- DATABASE ----------------
 
@@ -54,6 +54,15 @@ def init_db():
     CREATE TABLE IF NOT EXISTS lead_scores (
         user_id TEXT PRIMARY KEY,
         score INTEGER
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS customer_profile (
+        user_id TEXT PRIMARY KEY,
+        language TEXT,
+        last_intent TEXT,
+        last_emotion TEXT
     )
     """)
 
@@ -104,6 +113,23 @@ def get_history(user_id, limit=10):
 
     return history
 
+
+# ---------------- CUSTOMER PROFILE ----------------
+
+def update_customer_profile(user_id, language, intent, emotion):
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO customer_profile (user_id, language, last_intent, last_emotion)
+    VALUES (?, ?, ?, ?)
+    """, (user_id, language, intent, emotion))
+
+    conn.commit()
+    conn.close()
+
+
 # ---------------- LEAD SCORING ----------------
 
 def get_score(user_id):
@@ -111,10 +137,7 @@ def get_score(user_id):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT score FROM lead_scores WHERE user_id=?
-    """, (user_id,))
-
+    cursor.execute("SELECT score FROM lead_scores WHERE user_id=?", (user_id,))
     result = cursor.fetchone()
 
     conn.close()
@@ -165,6 +188,7 @@ def calculate_score(message):
 
     return score
 
+
 # ---------------- LEAD CLASSIFICATION ----------------
 
 def classify_lead(score):
@@ -180,7 +204,8 @@ def classify_lead(score):
 
     return "lead_frio"
 
-# ---------------- INTENT DETECTION ----------------
+
+# ---------------- INTENT ----------------
 
 def detect_intent(message):
 
@@ -188,7 +213,7 @@ def detect_intent(message):
 
     intents = {
         "saludo": ["hola", "hello", "hi"],
-        "precio": ["precio", "price", "rate"],
+        "precio": ["precio", "price"],
         "disponibilidad": ["disponibilidad", "available"],
         "reserva": ["reservar", "booking"],
         "objecion": ["caro", "expensive"],
@@ -198,34 +223,49 @@ def detect_intent(message):
     }
 
     for intent, words in intents.items():
-
         for word in words:
-
             if word in msg:
                 return intent
 
     return "informacion"
 
-# ---------------- BOOKING INTENT ----------------
 
-def detect_booking_intent(message):
+# ---------------- EMOTION DETECTION ----------------
+
+def detect_emotion(message):
 
     msg = message.lower()
 
-    keywords = [
-        "quiero reservar",
-        "reservar",
-        "confirmar reserva",
-        "book",
-        "booking"
-    ]
+    if "caro" in msg or "expensive" in msg:
+        return "frustracion"
 
-    for word in keywords:
+    if "gracias" in msg or "thank" in msg:
+        return "satisfaccion"
 
-        if word in msg:
-            return True
+    if "quiero reservar" in msg or "confirmar" in msg:
+        return "decision_compra"
 
-    return False
+    if "no estoy seguro" in msg or "not sure" in msg:
+        return "duda"
+
+    return "neutral"
+
+
+# ---------------- CLOSE PREDICTION ----------------
+
+def predict_close(score, emotion):
+
+    if score >= 80:
+        return "muy_probable"
+
+    if score >= 60 and emotion == "decision_compra":
+        return "probable"
+
+    if score >= 40:
+        return "posible"
+
+    return "baja_probabilidad"
+
 
 # ---------------- LANGUAGE ----------------
 
@@ -235,6 +275,7 @@ def detect_language(text):
         return detect(text)
     except:
         return "es"
+
 
 # ---------------- VECTOR DATABASE ----------------
 
@@ -291,6 +332,7 @@ def build_index():
         logging.error(f"Index error: {e}")
         vector_db = None
 
+
 # ---------------- STARTUP ----------------
 
 @app.on_event("startup")
@@ -302,6 +344,7 @@ async def startup_event():
         target=build_index,
         daemon=True
     ).start()
+
 
 # ---------------- CHAT ----------------
 
@@ -320,13 +363,24 @@ async def chat(data: Message):
 
         intent = detect_intent(data.message)
 
-        booking_intent = detect_booking_intent(data.message)
+        emotion = detect_emotion(data.message)
+
+        booking_intent = "reservar" in data.message.lower()
 
         points = calculate_score(data.message)
 
         score = update_score(data.user_id, points)
 
         lead_type = classify_lead(score)
+
+        close_prediction = predict_close(score, emotion)
+
+        update_customer_profile(
+            data.user_id,
+            language,
+            intent,
+            emotion
+        )
 
         save_message(data.user_id, "user", data.message)
 
@@ -350,17 +404,21 @@ async def chat(data: Message):
 
         system_prompt = f"""
 
-Responde utilizando únicamente la información disponible en los documentos.
+Responde únicamente usando la información de los documentos.
 
-Idioma del usuario: {language}
+Idioma: {language}
 
 Tipo de lead: {lead_type}
 
 Score del cliente: {score}
 
-Intención detectada: {intent}
+Intención: {intent}
 
-Si no encuentras la información en los documentos responde exactamente:
+Emoción del cliente: {emotion}
+
+Probabilidad de cierre: {close_prediction}
+
+Si no encuentras la información responde exactamente:
 
 "Esta información la consultaré y le responderé en la brevedad."
 
@@ -374,15 +432,15 @@ Información disponible:
 
             system_prompt += """
 
-El cliente parece listo para realizar una reserva.
+El cliente parece listo para reservar.
 
-Guía al cliente para completar la reserva solicitando:
+Solicita:
 
 - Nombre completo
 - Fecha de llegada
 - Fecha de salida
 - Cantidad de personas
-- Correo electrónico o teléfono
+- Email o teléfono
 
 """
 
@@ -410,7 +468,8 @@ Guía al cliente para completar la reserva solicitando:
             "score": score,
             "lead_type": lead_type,
             "intent": intent,
-            "booking_intent": booking_intent,
+            "emotion": emotion,
+            "close_prediction": close_prediction,
             "language": language
 
         }
@@ -423,6 +482,7 @@ Guía al cliente para completar la reserva solicitando:
             status_code=500,
             detail="Error procesando solicitud"
         )
+
 
 # ---------------- REBUILD INDEX ----------------
 
@@ -437,6 +497,7 @@ async def update_index():
     return {
         "message": "Index rebuilding"
     }
+
 
 # ---------------- HISTORY ----------------
 
@@ -461,6 +522,7 @@ async def history(user_id: str):
     conn.close()
 
     return rows
+
 
 # ---------------- MAIN ----------------
 
