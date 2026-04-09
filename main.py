@@ -1,475 +1,256 @@
 import os
 import uvicorn
 import sqlite3
-import logging
-import threading
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
-
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from langdetect import detect
 
-# ---------------- CONFIG ----------------
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-logging.basicConfig(level=logging.INFO)
+# =========================
+# CONFIG
+# =========================
 
-app = FastAPI(title="AI Call Center")
+os.environ["OPENAI_API_KEY"] = "TU_API_KEY"
 
-INDEX_FILE = "hotel_faiss_index"
-DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
-DATABASE = "memory.db"
+app = FastAPI()
 
-vector_db = None
-index_lock = threading.Lock()
+# =========================
+# MODELO IA
+# =========================
 
-# ---------------- MODELS ----------------
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.3
+)
 
-class Message(BaseModel):
-    user_id: str
-    message: str
+# =========================
+# BASE DE DATOS CRM
+# =========================
 
-# ---------------- DATABASE ----------------
+conn = sqlite3.connect("crm.db", check_same_thread=False)
+cursor = conn.cursor()
 
-def init_db():
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS clientes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre TEXT,
+    idioma TEXT,
+    score INTEGER,
+    emocion TEXT,
+    listo_cerrar INTEGER
+)
+""")
 
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS conversaciones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cliente TEXT,
+    mensaje TEXT,
+    respuesta TEXT
+)
+""")
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        role TEXT,
-        message TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
+conn.commit()
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS lead_scores (
-        user_id TEXT PRIMARY KEY,
-        score INTEGER
-    )
-    """)
+# =========================
+# CARGAR PDF DE VENTAS
+# =========================
 
-    conn.commit()
-    conn.close()
+loader = PyPDFLoader("tecnicas_psicologicas_ventas_callcenter_ia.pdf")
+documents = loader.load()
 
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=800,
+    chunk_overlap=100
+)
 
-def save_message(user_id, role, message):
+docs = text_splitter.split_documents(documents)
 
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+embeddings = OpenAIEmbeddings()
 
-    cursor.execute("""
-    INSERT INTO conversations (user_id, role, message)
-    VALUES (?, ?, ?)
-    """, (user_id, role, message))
+vectorstore = FAISS.from_documents(docs, embeddings)
 
-    conn.commit()
-    conn.close()
+retriever = vectorstore.as_retriever()
 
+# =========================
+# MODELO DE DATOS
+# =========================
 
-def get_history(user_id, limit=10):
+class ClienteMensaje(BaseModel):
+    nombre: str
+    mensaje: str
 
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+# =========================
+# DETECCION DE INTENCION
+# =========================
 
-    cursor.execute("""
-    SELECT role, message
-    FROM conversations
-    WHERE user_id=?
-    ORDER BY id DESC
-    LIMIT ?
-    """, (user_id, limit))
+def detectar_intencion(mensaje):
 
-    rows = cursor.fetchall()
-    conn.close()
+    prompt = f"""
+    Clasifica la intención del cliente.
 
-    rows.reverse()
+    Opciones:
 
-    history = []
+    informacion
+    precio
+    duda
+    objecion
+    compra
 
-    for role, message in rows:
+    Mensaje:
+    {mensaje}
+    """
 
-        if role == "user":
-            history.append(HumanMessage(content=message))
-        else:
-            history.append(SystemMessage(content=message))
+    result = llm.invoke(prompt)
 
-    return history
+    return result.content.strip().lower()
 
-# ---------------- LEAD SCORING ----------------
+# =========================
+# DETECCION EMOCIONAL
+# =========================
 
-def get_score(user_id):
+def detectar_emocion(mensaje):
 
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    prompt = f"""
+    Detecta la emoción del cliente.
 
-    cursor.execute("""
-    SELECT score FROM lead_scores WHERE user_id=?
-    """, (user_id,))
+    Opciones:
 
-    result = cursor.fetchone()
+    interesado
+    dudoso
+    confundido
+    frustrado
+    listo_comprar
 
-    conn.close()
+    Mensaje:
+    {mensaje}
+    """
 
-    if result:
-        return result[0]
+    result = llm.invoke(prompt)
 
-    return 0
+    return result.content.strip().lower()
 
+# =========================
+# LEAD SCORING
+# =========================
 
-def update_score(user_id, points):
-
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-
-    current_score = get_score(user_id)
-
-    new_score = current_score + points
-
-    cursor.execute("""
-    INSERT OR REPLACE INTO lead_scores (user_id, score)
-    VALUES (?, ?)
-    """, (user_id, new_score))
-
-    conn.commit()
-    conn.close()
-
-    return new_score
-
-
-def calculate_score(message):
-
-    msg = message.lower()
+def calcular_score(intencion, emocion):
 
     score = 0
 
-    if "precio" in msg or "price" in msg:
-        score += 10
+    if intencion == "precio":
+        score += 30
 
-    if "disponibilidad" in msg or "available" in msg:
+    if intencion == "compra":
+        score += 50
+
+    if emocion == "interesado":
         score += 20
 
-    if "reservar" in msg or "booking" in msg:
+    if emocion == "listo_comprar":
         score += 40
-
-    if "formas de pago" in msg or "payment" in msg:
-        score += 20
 
     return score
 
-# ---------------- LEAD CLASSIFICATION ----------------
+# =========================
+# DETECTAR SI CERRAR VENTA
+# =========================
 
-def classify_lead(score):
+def predecir_cierre(score):
 
-    if score >= 80:
-        return "lead_listo_para_comprar"
+    if score >= 70:
+        return True
+    else:
+        return False
 
-    if score >= 50:
-        return "lead_caliente"
+# =========================
+# MEMORIA DEL CLIENTE
+# =========================
 
-    if score >= 20:
-        return "lead_interesado"
-
-    return "lead_frio"
-
-# ---------------- INTENT DETECTION ----------------
-
-def detect_intent(message):
-
-    msg = message.lower()
-
-    intents = {
-        "saludo": ["hola", "hello", "hi"],
-        "precio": ["precio", "price", "rate"],
-        "disponibilidad": ["disponibilidad", "available"],
-        "reserva": ["reservar", "booking"],
-        "objecion": ["caro", "expensive"],
-        "comparacion": ["mejor que", "compare"],
-        "cliente_listo": ["quiero reservar", "confirmar reserva"],
-        "despedida": ["gracias", "bye"]
-    }
-
-    for intent, words in intents.items():
-
-        for word in words:
-
-            if word in msg:
-                return intent
-
-    return "informacion"
-
-# ---------------- BOOKING INTENT ----------------
-
-def detect_booking_intent(message):
-
-    msg = message.lower()
-
-    keywords = [
-        "quiero reservar",
-        "reservar",
-        "confirmar reserva",
-        "book",
-        "booking"
-    ]
-
-    for word in keywords:
-
-        if word in msg:
-            return True
-
-    return False
-
-# ---------------- LANGUAGE ----------------
-
-def detect_language(text):
-
-    try:
-        return detect(text)
-    except:
-        return "es"
-
-# ---------------- VECTOR DATABASE ----------------
-
-def build_index():
-
-    global vector_db
-
-    try:
-
-        embeddings = OpenAIEmbeddings()
-
-        if os.path.exists(INDEX_FILE):
-
-            logging.info("Loading FAISS index")
-
-            vector_db = FAISS.load_local(
-                INDEX_FILE,
-                embeddings,
-                allow_dangerous_deserialization=True
-            )
-
-        else:
-
-            logging.info("Building FAISS index")
-
-            docs = []
-
-            for file in os.listdir(DOCUMENTS_DIR):
-
-                if file.endswith(".pdf"):
-
-                    loader = PyPDFLoader(
-                        os.path.join(DOCUMENTS_DIR, file)
-                    )
-
-                    docs.extend(loader.load())
-
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=800,
-                chunk_overlap=100
-            )
-
-            chunks = splitter.split_documents(docs)
-
-            vector_db = FAISS.from_documents(
-                chunks,
-                embeddings
-            )
-
-            vector_db.save_local(INDEX_FILE)
-
-    except Exception as e:
-
-        logging.error(f"Index error: {e}")
-        vector_db = None
-
-# ---------------- STARTUP ----------------
-
-@app.on_event("startup")
-async def startup_event():
-
-    init_db()
-
-    threading.Thread(
-        target=build_index,
-        daemon=True
-    ).start()
-
-# ---------------- CHAT ----------------
-
-@app.post("/chat")
-async def chat(data: Message):
-
-    if vector_db is None:
-
-        return {
-            "response": "Estoy cargando la información. Intente nuevamente en unos segundos."
-        }
-
-    try:
-
-        language = detect_language(data.message)
-
-        intent = detect_intent(data.message)
-
-        booking_intent = detect_booking_intent(data.message)
-
-        points = calculate_score(data.message)
-
-        score = update_score(data.user_id, points)
-
-        lead_type = classify_lead(score)
-
-        save_message(data.user_id, "user", data.message)
-
-        history = get_history(data.user_id)
-
-        with index_lock:
-
-            docs = vector_db.similarity_search(
-                data.message,
-                k=5
-            )
-
-        context = "\n\n".join(
-            [doc.page_content for doc in docs]
-        )
-
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.4
-        )
-
-        system_prompt = f"""
-
-Responde utilizando únicamente la información disponible en los documentos.
-
-Idioma del usuario: {language}
-
-Tipo de lead: {lead_type}
-
-Score del cliente: {score}
-
-Intención detectada: {intent}
-
-Si no encuentras la información en los documentos responde exactamente:
-
-"Esta información la consultaré y le responderé en la brevedad."
-
-Información disponible:
-
-{context}
-
-"""
-
-        if score >= 80 or booking_intent:
-
-            system_prompt += """
-
-El cliente parece listo para realizar una reserva.
-
-Guía al cliente para completar la reserva solicitando:
-
-- Nombre completo
-- Fecha de llegada
-- Fecha de salida
-- Cantidad de personas
-- Correo electrónico o teléfono
-
-"""
-
-        messages = [
-            SystemMessage(content=system_prompt)
-        ]
-
-        messages.extend(history)
-
-        messages.append(
-            HumanMessage(content=data.message)
-        )
-
-        response = llm.invoke(messages)
-
-        save_message(
-            data.user_id,
-            "assistant",
-            response.content
-        )
-
-        return {
-
-            "response": response.content,
-            "score": score,
-            "lead_type": lead_type,
-            "intent": intent,
-            "booking_intent": booking_intent,
-            "language": language
-
-        }
-
-    except Exception as e:
-
-        logging.error(f"Error: {e}")
-
-        raise HTTPException(
-            status_code=500,
-            detail="Error procesando solicitud"
-        )
-
-# ---------------- REBUILD INDEX ----------------
-
-@app.post("/update-index")
-async def update_index():
-
-    threading.Thread(
-        target=build_index,
-        daemon=True
-    ).start()
-
-    return {
-        "message": "Index rebuilding"
-    }
-
-# ---------------- HISTORY ----------------
-
-@app.get("/history/{user_id}")
-async def history(user_id: str):
-
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+def guardar_conversacion(cliente, mensaje, respuesta):
 
     cursor.execute("""
+    INSERT INTO conversaciones (cliente, mensaje, respuesta)
+    VALUES (?, ?, ?)
+    """, (cliente, mensaje, respuesta))
 
-    SELECT role, message, timestamp
-    FROM conversations
-    WHERE user_id=?
-    ORDER BY id DESC
-    LIMIT 20
+    conn.commit()
 
-    """, (user_id,))
+# =========================
+# RESPUESTA IA
+# =========================
 
-    rows = cursor.fetchall()
+def generar_respuesta(mensaje):
 
-    conn.close()
+    docs = retriever.get_relevant_documents(mensaje)
 
-    return rows
+    contexto = "\n".join([d.page_content for d in docs])
 
-# ---------------- MAIN ----------------
+    prompt = f"""
+    Usa la siguiente información para responder al cliente.
+
+    {contexto}
+
+    Cliente pregunta:
+    {mensaje}
+    """
+
+    result = llm.invoke(prompt)
+
+    return result.content
+
+# =========================
+# ENDPOINT PRINCIPAL
+# =========================
+
+@app.post("/chat")
+def chat(data: ClienteMensaje):
+
+    idioma = detect(data.mensaje)
+
+    intencion = detectar_intencion(data.mensaje)
+
+    emocion = detectar_emocion(data.mensaje)
+
+    score = calcular_score(intencion, emocion)
+
+    listo_cerrar = predecir_cierre(score)
+
+    respuesta = generar_respuesta(data.mensaje)
+
+    if listo_cerrar:
+
+        respuesta += """
+
+        Podemos activar el servicio ahora mismo.
+        ¿Deseas que te ayude a completar la compra?
+        """
+
+    cursor.execute("""
+    INSERT INTO clientes (nombre, idioma, score, emocion, listo_cerrar)
+    VALUES (?, ?, ?, ?, ?)
+    """, (data.nombre, idioma, score, emocion, int(listo_cerrar)))
+
+    conn.commit()
+
+    guardar_conversacion(data.nombre, data.mensaje, respuesta)
+
+    return {
+        "respuesta": respuesta,
+        "idioma": idioma,
+        "intencion": intencion,
+        "emocion": emocion,
+        "lead_score": score,
+        "listo_para_cerrar": listo_cerrar
+    }
+
+# =========================
+# INICIAR SERVIDOR
+# =========================
 
 if __name__ == "__main__":
-
-    port = int(os.environ.get("PORT", 8000))
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
