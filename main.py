@@ -3,6 +3,7 @@ import uvicorn
 import sqlite3
 import logging
 import threading
+import json
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -79,7 +80,7 @@ def get_history(user_id, limit=8):
         if role == "user":
             history.append(HumanMessage(content=message))
         else:
-            history.append(AIMessage(content=message))
+            history.append(SystemMessage(content=message))
     return history
 
 # ---------------- ANALÍTICA CON IA (EMOCIÓN E INTENCIÓN) ----------------
@@ -101,10 +102,10 @@ def analyze_customer_behavior(message):
     """
     try:
         response = llm_analyst.invoke(prompt)
-        # Limpieza básica para asegurar que sea un dict ejecutable
-        data = eval(response.content.strip())
+        data = json.loads(response.content.strip())
         return data.get("intencion", "informacion"), data.get("emocion", "neutral")
-    except:
+    except Exception as e:
+        logging.warning(f"Error al analizar comportamiento: {e}")
         return "informacion", "neutral"
 
 def update_lead_data(user_id, points, language, intent, emotion):
@@ -128,13 +129,12 @@ def update_lead_data(user_id, points, language, intent, emotion):
     return final_score
 
 def calculate_points(intent, emotion):
-    # Lógica de puntos basada en el análisis de IA
+    # Puntos más granular
     points = 5 # Puntos por interactuar
-    if intent == "precio": points += 15
-    if intent == "reserva": points += 40
-    if intent == "disponibilidad": points += 20
-    if emotion == "decision_compra": points += 30
-    if emotion == "frustracion": points -= 10
+    intent_points = {"precio":15, "reserva":40, "disponibilidad":20, "objecion":-10, "comparacion":5, "saludo":2}
+    emotion_points = {"decision_compra":30, "frustracion":-10, "satisfaccion":15, "duda":-5}
+    points += intent_points.get(intent,0)
+    points += emotion_points.get(emotion,0)
     return points
 
 # ---------------- MOTOR RAG (FAISS) ----------------
