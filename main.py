@@ -21,11 +21,15 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from langdetect import detect
 
+
 # ---------------- CONFIGURACIÓN ----------------
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+# NUEVA VARIABLE PARA ACTIVAR / DESACTIVAR BOT
+BOT_ACTIVE = os.getenv("BOT_ACTIVE", "true")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -38,6 +42,7 @@ DATABASE = "memory.db"
 vector_db = None
 index_lock = threading.Lock()
 
+
 class Message(BaseModel):
     user_id: str
     message: str
@@ -46,6 +51,7 @@ class Message(BaseModel):
 # ---------------- BASE DE DATOS ----------------
 
 def init_db():
+
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
 
@@ -120,37 +126,20 @@ def get_history(user_id, limit=8):
     return history
 
 
-# ---------------- ANALÍTICA CON IA ----------------
+# ---------------- ANALÍTICA ----------------
 
 def analyze_customer_behavior(message):
 
     llm_analyst = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
     prompt = f"""
-    Analiza el siguiente mensaje de un cliente.
+    Analiza el siguiente mensaje.
 
     Mensaje: "{message}"
 
     Responde JSON:
 
     {{"intencion":"valor","emocion":"valor"}}
-
-    intencion:
-    saludo
-    precio
-    disponibilidad
-    reserva
-    objecion
-    comparacion
-    despedida
-    informacion
-
-    emocion:
-    frustracion
-    satisfaccion
-    decision_compra
-    duda
-    neutral
     """
 
     try:
@@ -163,7 +152,6 @@ def analyze_customer_behavior(message):
     except Exception as e:
 
         logging.warning(e)
-
         return "informacion","neutral"
 
 
@@ -236,8 +224,6 @@ def build_index():
                 allow_dangerous_deserialization=True
             )
 
-            logging.info("FAISS cargado")
-
         else:
 
             docs = []
@@ -265,8 +251,6 @@ def build_index():
 
                 vector_db.save_local(INDEX_FILE)
 
-                logging.info("FAISS creado")
-
     except Exception as e:
 
         logging.error(e)
@@ -275,6 +259,10 @@ def build_index():
 # ---------------- MOTOR IA ----------------
 
 def process_message(user_id,message):
+
+    # SI BOT ESTA APAGADO
+    if BOT_ACTIVE.lower() != "true":
+        return "El asistente está temporalmente desactivado."
 
     intent,emotion = analyze_customer_behavior(message)
 
@@ -303,20 +291,14 @@ def process_message(user_id,message):
     emocion:{emotion}
     score:{total_score}
 
-    Usa solo el contexto.
-
     CONTEXTO:
     {contexto}
     """
 
     messages=[
-
         SystemMessage(content=system_rules),
-
         *history,
-
         HumanMessage(content=message)
-
     ]
 
     response=llm.invoke(messages)
@@ -343,7 +325,6 @@ async def chat(data:Message):
     except Exception as e:
 
         logging.error(e)
-
         raise HTTPException(500,"error interno")
 
 
