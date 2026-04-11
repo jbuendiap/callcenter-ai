@@ -11,4 +11,4 @@ faiss-cpu
 openai
 tiktoken
 langdetect
-sqlite-utils
+python-telegram-bot
