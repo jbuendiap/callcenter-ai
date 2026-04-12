@@ -26,9 +26,9 @@ from langdetect import detect
 
 load_dotenv()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# NUEVA VARIABLE PARA ACTIVAR / DESACTIVAR BOT
+# VARIABLE PARA ACTIVAR / DESACTIVAR BOT
 BOT_ACTIVE = os.getenv("BOT_ACTIVE", "true")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -251,6 +251,8 @@ def build_index():
 
                 vector_db.save_local(INDEX_FILE)
 
+        logging.info("Base de conocimiento cargada")
+
     except Exception as e:
 
         logging.error(e)
@@ -260,9 +262,12 @@ def build_index():
 
 def process_message(user_id,message):
 
-    # SI BOT ESTA APAGADO
+    # BOT APAGADO
     if BOT_ACTIVE.lower() != "true":
         return "El asistente está temporalmente desactivado."
+
+    if vector_db is None:
+        return "Inicializando conocimiento..."
 
     intent,emotion = analyze_customer_behavior(message)
 
@@ -291,6 +296,8 @@ def process_message(user_id,message):
     emocion:{emotion}
     score:{total_score}
 
+    Usa el contexto para responder.
+
     CONTEXTO:
     {contexto}
     """
@@ -313,9 +320,6 @@ def process_message(user_id,message):
 @app.post("/chat")
 async def chat(data:Message):
 
-    if vector_db is None:
-        return {"response":"Inicializando IA"}
-
     try:
 
         response = process_message(data.user_id,data.message)
@@ -332,6 +336,9 @@ async def chat(data:Message):
 
 async def telegram_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
+    if not update.message or not update.message.text:
+        return
+
     user_id = str(update.message.from_user.id)
     message = update.message.text
 
@@ -344,7 +351,7 @@ async def start_telegram_bot():
 
     if not TELEGRAM_TOKEN:
 
-        logging.warning("No TELEGRAM_TOKEN definido")
+        logging.warning("No TELEGRAM_BOT_TOKEN definido")
         return
 
     bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
