@@ -5,6 +5,7 @@ import logging
 import threading
 import json
 import requests
+import shutil
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -18,7 +19,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from langdetect import detect, DetectorFactory
 
-# Garantiza que los resultados de detección de idioma sean consistentes
+# Estabilidad para idiomas como el Ruso
 DetectorFactory.seed = 0
 
 # ---------------- CONFIGURACIÓN ----------------
@@ -28,7 +29,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BOT_ACTIVE = os.getenv("BOT_ACTIVE", "true")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-app = FastAPI(title="AI Hotel Elite Sales Agent - Multilang")
+app = FastAPI(title="AI Hotel Elite Sales Agent - Full Correction")
 
 INDEX_FILE = "hotel_faiss_index"
 DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
@@ -70,19 +71,18 @@ def get_history(user_id, limit=6):
     rows.reverse()
     return [HumanMessage(content=m) if r == "user" else AIMessage(content=m) for r, m in rows]
 
-# ---------------- MOTOR IA (VENDEDOR MULTILENGUAJE) ----------------
+# ---------------- MOTOR IA (VENDEDOR ELITE MULTILENGUAJE) ----------------
 def process_message(user_id, message):
     try:
         if str(BOT_ACTIVE).lower() != "true":
-            return "System offline."
+            return "Lo sentimos, el sistema de reservas está en mantenimiento."
 
-        # DETECCIÓN DE IDIOMA MEJORADA
+        # DETECCIÓN DE IDIOMA
         try:
             lang_code = detect(message)
         except:
             lang_code = "es"
 
-        # Mapeo extendido para incluir RUSO y otros
         lang_map = {
             "es": "Español", "en": "Inglés", "ru": "Ruso", 
             "fr": "Francés", "de": "Alemán", "it": "Italiano"
@@ -95,23 +95,26 @@ def process_message(user_id, message):
         contexto = ""
         if vector_db is not None:
             with index_lock:
-                # k=10 para capturar bien las objeciones
-                docs = vector_db.similarity_search(message, k=10)
-                contexto = "\n\n".join([d.page_content for d in docs])
+                # k=12 para encontrar precios y quejas sin fallar
+                docs = vector_db.similarity_search(message, k=12)
+                contexto = "\n\n".join([f"FUENTE: {d.page_content}" for d in docs])
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+        if not contexto:
+            contexto = "No se encontró información en los documentos. Pide al cliente esperar un momento."
+
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
         
         system_rules = f"""
-        ROL: Eres un Experto Vendedor de Lujo. 
-        IDIOMA DE RESPUESTA: Debes responder OBLIGATORIAMENTE en {idioma_destino}.
+        ROL: Eres el Gerente de Ventas Senior. Eres persuasivo, elegante y directo.
+        IDIOMA: Debes responder OBLIGATORIAMENTE en {idioma_destino}.
         
-        TU MISIÓN:
-        1. Vender la opción más cara y mejorar la experiencia del cliente (Upselling).
-        2. Usar el CONTEXTO proporcionado para manejar objeciones. Los documentos están en Español, pero tú debes traducir las soluciones al {idioma_destino} de forma fluida y persuasiva.
-        3. Si el cliente habla en Ruso, responde con gramática perfecta en Ruso.
-        4. Sé un cerrador de ventas, no un informador.
+        INSTRUCCIONES DE BÚSQUEDA CRÍTICAS:
+        1. PRECIOS: Busca en el CONTEXTO cualquier cifra con '$', 'USD' o 'costo'. Si el cliente pregunta precio, dale el valor exacto que aparece en 'hotel_info.pdf'.
+        2. QUEJAS: Si el cliente está molesto o duda, usa las técnicas de 'manejo_objeciones.pdf' que están abajo.
+        3. FUENTE DE VERDAD: Tu conocimiento viene SOLO de los manuales. Si la info está en el CONTEXTO, no puedes decir "no sé".
+        4. UPSELLING: Siempre sugiere una mejora de habitación o servicio VIP basándote en los documentos.
 
-        CONTEXTO:
+        CONTEXTO RECUPERADO DE LOS MANUALES:
         {contexto}
         """
 
@@ -121,31 +124,42 @@ def process_message(user_id, message):
         return response.content
 
     except Exception as e:
-        logging.error(f"Error: {e}")
-        return "Internal Error."
+        logging.error(f"Error en el proceso: {e}")
+        return "Disculpe, estoy teniendo dificultades técnicas. ¿Podría repetir su pregunta?"
 
-# ---------------- RAG E INDEXACIÓN ----------------
+# ---------------- RAG E INDEXACIÓN (MEJORADA) ----------------
 def build_index():
     global vector_db
     try:
         embeddings = OpenAIEmbeddings()
-        if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
+        
+        # ELIMINAR ÍNDICE VIEJO PARA FORZAR ACTUALIZACIÓN DE PRECIOS
+        if os.path.exists(INDEX_FILE):
+            logging.info("Borrando índice antiguo para actualizar datos...")
+            shutil.rmtree(INDEX_FILE)
+
+        if not os.path.exists(DOCUMENTS_DIR): 
+            os.makedirs(DOCUMENTS_DIR)
         
         docs = []
         for file in os.listdir(DOCUMENTS_DIR):
             if file.endswith(".pdf"):
+                logging.info(f"Cargando documento: {file}")
                 loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, file))
                 docs.extend(loader.load())
         
         if docs:
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            # Fragmentos más grandes (1200) para no perder contexto de precios
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=250)
             chunks = splitter.split_documents(docs)
             with index_lock:
                 vector_db = FAISS.from_documents(chunks, embeddings)
                 vector_db.save_local(INDEX_FILE)
-            logging.info("FAISS Index Rebuilt.")
+            logging.info("¡Base de datos de ventas actualizada y lista!")
+        else:
+            logging.error("ATENCIÓN: No hay archivos PDF en la carpeta /documents")
     except Exception as e:
-        logging.error(f"Index Error: {e}")
+        logging.error(f"Error crítico en indexación: {e}")
 
 # ---------------- ENDPOINTS ----------------
 
@@ -153,24 +167,32 @@ def build_index():
 async def vapi_webhook(request: Request):
     data = await request.json()
     try:
-        tool_calls = data.get("message", {}).get("toolCalls", [])
+        # Vapi envía la pregunta en 'query' como configuramos
+        message_data = data.get("message", {})
+        tool_calls = message_data.get("toolCalls", [])
+        
         if tool_calls:
             tool_call = tool_calls[0]
             args = tool_call.get("function", {}).get("arguments", {})
             user_query = args.get("query") or args.get("message") or ""
+            
             if user_query:
                 respuesta = process_message("vapi_user", user_query)
+                # Devolvemos el resultado en 'result' como configuramos
                 return {"results": [{"toolCallId": tool_call.get("id"), "result": respuesta}]}
-    except: pass
+    except Exception as e:
+        logging.error(f"Error en Webhook Vapi: {e}")
     return {"ok": True}
 
 @app.on_event("startup")
 async def startup():
     init_db()
+    # Ejecutar indexación al arrancar
     threading.Thread(target=build_index, daemon=True).start()
 
 @app.get("/")
-def root(): return {"status": "Online"}
+def root(): return {"status": "Sales Agent Online & Multilingual"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
