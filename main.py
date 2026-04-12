@@ -25,7 +25,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BOT_ACTIVE = os.getenv("BOT_ACTIVE", "true")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-app = FastAPI(title="AI Hotel Booking Agent")
+app = FastAPI(title="AI Hotel Elite Sales Agent")
 
 INDEX_FILE = "hotel_faiss_index"
 DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
@@ -33,10 +33,6 @@ DATABASE = "memory.db"
 
 vector_db = None
 index_lock = threading.Lock()
-
-class Message(BaseModel):
-    user_id: str
-    message: str
 
 # ---------------- BASE DE DATOS ----------------
 def init_db():
@@ -78,7 +74,7 @@ def save_message(user_id, role, message):
     except Exception as e:
         logging.error(f"Error guardando mensaje: {e}")
 
-def get_history(user_id, limit=8):
+def get_history(user_id, limit=6):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute("SELECT role, message FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
@@ -94,13 +90,14 @@ def get_history(user_id, limit=8):
             history.append(AIMessage(content=message))
     return history
 
-# ---------------- ANALÍTICA ----------------
+# ---------------- ANALÍTICA DE VENTAS ----------------
 def analyze_customer_behavior(message):
     llm_analyst = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     prompt = f"""
-    Analiza el siguiente mensaje y responde ÚNICAMENTE con el JSON.
+    Eres un analista de ventas experto. Analiza el mensaje del cliente y responde ÚNICAMENTE con JSON.
+    Identifica si tiene dudas sobre el precio, interés en lujo o si está listo para cerrar.
     Mensaje: "{message}"
-    JSON: {{"intencion":"valor","emocion":"valor"}}
+    JSON: {{"intencion":"reserva|queja|precio|informacion","emocion":"interesado|dudoso|molesto|neutral"}}
     """
     try:
         response = llm_analyst.invoke(prompt)
@@ -108,7 +105,6 @@ def analyze_customer_behavior(message):
         data = json.loads(clean_content)
         return data.get("intencion", "informacion"), data.get("emocion", "neutral")
     except Exception as e:
-        logging.warning(f"Fallo análisis semántico: {e}")
         return "informacion", "neutral"
 
 def update_lead_data(user_id, points, language, intent, emotion):
@@ -116,26 +112,25 @@ def update_lead_data(user_id, points, language, intent, emotion):
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO lead_scores (user_id, score) VALUES (?, 0)", (user_id,))
     cursor.execute("UPDATE lead_scores SET score = score + ? WHERE user_id = ?", (points, user_id))
-    cursor.execute("""
-    INSERT OR REPLACE INTO customer_profile (user_id, language, last_intent, last_emotion)
-    VALUES (?, ?, ?, ?)
-    """, (user_id, language, intent, emotion))
+    cursor.execute("INSERT OR REPLACE INTO customer_profile (user_id, language, last_intent, last_emotion) VALUES (?, ?, ?, ?)", 
+                   (user_id, language, intent, emotion))
     conn.commit()
     cursor.execute("SELECT score FROM lead_scores WHERE user_id=?", (user_id,))
     score = cursor.fetchone()[0]
     conn.close()
     return score
 
-# ---------------- MOTOR IA ----------------
+# ---------------- MOTOR IA (VENDEDOR ELITE) ----------------
 def process_message(user_id, message):
     try:
         if str(BOT_ACTIVE).lower() != "true":
-            return "El asistente está temporalmente desactivado."
+            return "El sistema está en mantenimiento, por favor contacte a un humano."
 
         intent, emotion = analyze_customer_behavior(message)
         language = detect(message) if len(message) > 3 else "es"
         
-        points = 25 if intent in ["reserva", "precio", "disponibilidad"] else 5
+        # Puntuación de urgencia: Si pregunta por precio o reserva, es un Lead Caliente.
+        points = 40 if intent in ["reserva", "precio"] else 10
         total_score = update_lead_data(user_id, points, language, intent, emotion)
 
         save_message(user_id, "user", message)
@@ -144,18 +139,30 @@ def process_message(user_id, message):
         contexto = ""
         if vector_db is not None:
             with index_lock:
-                docs = vector_db.similarity_search(message, k=4)
-                contexto = "\n\n".join([d.page_content for d in docs])
+                # Buscamos 10 fragmentos para tener TODA la info de objeciones y cierres
+                docs = vector_db.similarity_search(message, k=10)
+                contexto = "\n\n".join([f"DOC_REF: {d.page_content}" for d in docs])
 
-        if not contexto:
-            contexto = "No hay detalles específicos en los documentos."
-
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.4)
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.5)
         
+        # EL PROMPT DE VENTAS
         system_rules = f"""
-        Eres el Asistente Virtual de Reservas oficial. Tu misión es VENDER usando el CONTEXTO.
-        Score cliente: {total_score}. Idioma: {language}.
-        CONTEXTO: {contexto}
+        ROL: Eres el Gerente de Ventas de Élite del Hotel. Tu única misión es CERRAR VENTAS y hacer UP-SELLING.
+        
+        DATOS DEL CLIENTE:
+        - Score de Interés: {total_score}/100 (A mayor score, sé más directo al cierre).
+        - Intención detectada: {intent}.
+        - Emoción actual: {emotion}.
+
+        REGLAS DE ORO:
+        1. Usa EXCLUSIVAMENTE la información de los manuales en el CONTEXTO.
+        2. Si el cliente tiene dudas, usa las 'Técnicas de Manejo de Objeciones' del contexto.
+        3. Siempre ofrece una mejora: Si pregunta por algo básico, vende la Suite o la experiencia VIP.
+        4. No seas un robot informativo. Sé persuasivo, elegante y audaz.
+        5. Al final de cada respuesta, haz una pregunta de cierre (ej: "¿Le reservo la Suite ahora mismo?").
+
+        CONTEXTO DE LOS MANUALES:
+        {contexto}
         """
 
         messages = [SystemMessage(content=system_rules), *history, HumanMessage(content=message)]
@@ -163,43 +170,49 @@ def process_message(user_id, message):
         save_message(user_id, "assistant", response.content)
         return response.content
     except Exception as e:
-        logging.error(f"Error en process_message: {e}")
-        return "Lo siento, tuve un inconveniente técnico."
+        logging.error(f"Error crítico: {e}")
+        return "Para brindarle una atención personalizada, por favor espere un momento a que un ejecutivo tome la llamada."
 
 # ---------------- RAG E INDEXACIÓN ----------------
 def build_index():
     global vector_db
     try:
         embeddings = OpenAIEmbeddings()
-        if os.path.exists(INDEX_FILE):
-            vector_db = FAISS.load_local(INDEX_FILE, embeddings, allow_dangerous_deserialization=True)
-            logging.info("FAISS cargado.")
-        else:
-            if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
-            docs = []
-            for file in os.listdir(DOCUMENTS_DIR):
-                if file.endswith(".pdf"):
-                    loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, file))
-                    docs.extend(loader.load())
-            if docs:
-                splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-                chunks = splitter.split_documents(docs)
+        # Siempre escaneamos documentos para asegurar que los nuevos PDFs (objeciones) entren al sistema
+        if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
+        
+        docs = []
+        logging.info("Iniciando escaneo de documentos...")
+        for file in os.listdir(DOCUMENTS_DIR):
+            if file.endswith(".pdf"):
+                logging.info(f"Procesando PDF: {file}")
+                loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, file))
+                docs.extend(loader.load())
+        
+        if docs:
+            splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=150)
+            chunks = splitter.split_documents(docs)
+            with index_lock:
                 vector_db = FAISS.from_documents(chunks, embeddings)
                 vector_db.save_local(INDEX_FILE)
-                logging.info("Índice FAISS creado.")
+            logging.info("Índice FAISS actualizado con éxito.")
+        else:
+            logging.warning("No se encontraron PDFs en /documents")
+            if os.path.exists(INDEX_FILE):
+                vector_db = FAISS.load_local(INDEX_FILE, embeddings, allow_dangerous_deserialization=True)
+                logging.info("Cargado índice previo ante falta de PDFs.")
     except Exception as e:
         logging.error(f"Error build_index: {e}")
 
 # ---------------- ENDPOINTS ----------------
 
 @app.get("/")
-def root(): return {"status": "AI Booking Agent Online"}
+def root(): return {"status": "Sales Agent Active"}
 
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
     data = await request.json()
     try:
-        # Corrección: Telegram envía el chat_id en data['message']['chat']['id']
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
         if text:
@@ -210,23 +223,19 @@ async def telegram_webhook(request: Request):
         logging.error(f"Error Telegram: {e}")
     return {"ok": True}
 
-# --- ENDPOINT PARA VAPI (ESTO ES LO QUE TE FALTABA) ---
 @app.post("/vapi-webhook")
 async def vapi_webhook(request: Request):
     data = await request.json()
     try:
-        # Vapi envía los argumentos de la función en toolCalls
         message_data = data.get("message", {})
         tool_calls = message_data.get("toolCalls", [])
         
         if tool_calls:
             tool_call = tool_calls[0]
             args = tool_call.get("function", {}).get("arguments", {})
-            # Buscamos 'query' o 'message' según cómo lo configuraste en Vapi
             user_query = args.get("query") or args.get("message") or ""
             
             if user_query:
-                # Procesamos con RAG
                 respuesta = process_message("vapi_call", user_query)
                 return {"results": [{"toolCallId": tool_call.get("id"), "result": respuesta}]}
     except Exception as e:
@@ -237,6 +246,7 @@ async def vapi_webhook(request: Request):
 @app.on_event("startup")
 async def startup():
     init_db()
+    # Ejecutamos la indexación en un hilo para no bloquear el arranque
     threading.Thread(target=build_index, daemon=True).start()
 
 if __name__ == "__main__":
