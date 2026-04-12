@@ -5,6 +5,7 @@ import logging
 import threading
 import json
 import asyncio
+import requests
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -218,6 +219,8 @@ def build_index():
                 allow_dangerous_deserialization=True
             )
 
+            logging.info("FAISS cargado")
+
         else:
 
             docs = []
@@ -245,6 +248,8 @@ def build_index():
 
                 vector_db.save_local(INDEX_FILE)
 
+                logging.info("FAISS creado")
+
     except Exception as e:
 
         logging.error(e)
@@ -254,60 +259,72 @@ def build_index():
 
 def process_message(user_id,message):
 
-    if BOT_ACTIVE.lower() != "true":
-        return "El asistente está temporalmente desactivado."
+    try:
 
-    intent,emotion = analyze_customer_behavior(message)
+        if BOT_ACTIVE.lower() != "true":
+            return "El asistente está temporalmente desactivado."
 
-    language = detect(message) if len(message)>3 else "es"
+        intent,emotion = analyze_customer_behavior(message)
 
-    points = calculate_points(intent,emotion)
+        language = detect(message) if len(message)>3 else "es"
 
-    total_score = update_lead_data(user_id,points,language,intent,emotion)
+        points = calculate_points(intent,emotion)
 
-    save_message(user_id,"user",message)
+        total_score = update_lead_data(user_id,points,language,intent,emotion)
 
-    history = get_history(user_id)
+        save_message(user_id,"user",message)
 
-    with index_lock:
-        docs = vector_db.similarity_search(message,k=4)
+        history = get_history(user_id)
 
-    contexto = "\n\n".join([d.page_content for d in docs])
+        contexto = ""
 
-    llm = ChatOpenAI(model="gpt-4o-mini",temperature=0.4)
+        if vector_db is not None:
 
-    system_rules=f"""
-    Eres experto en ventas hoteleras.
+            with index_lock:
+                docs = vector_db.similarity_search(message,k=4)
 
-    idioma:{language}
-    intent:{intent}
-    emocion:{emotion}
-    score:{total_score}
+            contexto = "\n\n".join([d.page_content for d in docs])
 
-    CONTEXTO:
-    {contexto}
-    """
+        if contexto == "":
+            contexto = "No hay información disponible en los documentos."
 
-    messages=[
-        SystemMessage(content=system_rules),
-        *history,
-        HumanMessage(content=message)
-    ]
+        llm = ChatOpenAI(model="gpt-4o-mini",temperature=0.4)
 
-    response=llm.invoke(messages)
+        system_rules=f"""
+        Eres experto en ventas hoteleras.
 
-    save_message(user_id,"assistant",response.content)
+        idioma:{language}
+        intent:{intent}
+        emocion:{emotion}
+        score:{total_score}
 
-    return response.content
+        CONTEXTO:
+        {contexto}
+        """
+
+        messages=[
+            SystemMessage(content=system_rules),
+            *history,
+            HumanMessage(content=message)
+        ]
+
+        response=llm.invoke(messages)
+
+        save_message(user_id,"assistant",response.content)
+
+        return response.content
+
+    except Exception as e:
+
+        logging.error(e)
+
+        return "Ocurrió un error procesando el mensaje."
 
 
 # ---------------- API CHAT ----------------
 
 @app.post("/chat")
 async def chat(data:Message):
-
-    if vector_db is None:
-        return {"response":"Inicializando IA"}
 
     try:
 
@@ -318,6 +335,7 @@ async def chat(data:Message):
     except Exception as e:
 
         logging.error(e)
+
         raise HTTPException(500,"error interno")
 
 
@@ -339,8 +357,6 @@ async def telegram_webhook(request: Request):
     reply = process_message(user_id,message)
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    import requests
 
     requests.post(url,json={
         "chat_id":user_id,
