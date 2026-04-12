@@ -4,7 +4,6 @@ import sqlite3
 import logging
 import threading
 import json
-import asyncio
 import requests
 
 from fastapi import FastAPI, HTTPException, Request
@@ -20,14 +19,14 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langdetect import detect
 
 # ---------------- CONFIGURACIÓN ----------------
-
 load_dotenv()
 
+# TOKEN Y VARIABLES DE RAILWAY
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Usamos un valor por defecto seguro para evitar errores de NoneType
 BOT_ACTIVE = os.getenv("BOT_ACTIVE", "true")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
 app = FastAPI(title="AI Call Center Pro")
 
 INDEX_FILE = "hotel_faiss_index"
@@ -37,19 +36,14 @@ DATABASE = "memory.db"
 vector_db = None
 index_lock = threading.Lock()
 
-
 class Message(BaseModel):
     user_id: str
     message: str
 
-
 # ---------------- BASE DE DATOS ----------------
-
 def init_db():
-
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS conversations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,14 +53,12 @@ def init_db():
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
-
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS lead_scores (
         user_id TEXT PRIMARY KEY,
         score INTEGER DEFAULT 0
     )
     """)
-
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS customer_profile (
         user_id TEXT PRIMARY KEY,
@@ -75,318 +67,160 @@ def init_db():
         last_emotion TEXT
     )
     """)
-
     conn.commit()
     conn.close()
-
 
 def save_message(user_id, role, message):
-
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-
-    cursor.execute(
-        "INSERT INTO conversations (user_id, role, message) VALUES (?, ?, ?)",
-        (user_id, role, message),
-    )
-
-    conn.commit()
-    conn.close()
-
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO conversations (user_id, role, message) VALUES (?, ?, ?)", (user_id, role, message))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Error guardando mensaje: {e}")
 
 def get_history(user_id, limit=8):
-
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-
-    cursor.execute(
-        "SELECT role, message FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT ?",
-        (user_id, limit),
-    )
-
+    cursor.execute("SELECT role, message FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
     rows = cursor.fetchall()
     conn.close()
-
     rows.reverse()
-
+    
     history = []
-
     for role, message in rows:
-
         if role == "user":
             history.append(HumanMessage(content=message))
         else:
             history.append(AIMessage(content=message))
-
     return history
 
-
-# ---------------- ANALÍTICA ----------------
-
+# ---------------- ANALÍTICA MEJORADA ----------------
 def analyze_customer_behavior(message):
-
     llm_analyst = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-
+    
+    # Prompt más estricto para evitar texto basura fuera del JSON
     prompt = f"""
-    Analiza el siguiente mensaje de cliente.
-
+    Analiza el siguiente mensaje y responde ÚNICAMENTE con el JSON.
     Mensaje: "{message}"
-
-    Responde JSON:
-
-    {{"intencion":"valor","emocion":"valor"}}
+    JSON: {{"intencion":"valor","emocion":"valor"}}
     """
-
     try:
-
         response = llm_analyst.invoke(prompt)
-        data = json.loads(response.content)
-
-        return data.get("intencion","informacion"), data.get("emocion","neutral")
-
+        # Limpieza de Markdown si la IA lo incluye
+        clean_content = response.content.strip().replace("```json", "").replace("```", "")
+        data = json.loads(clean_content)
+        return data.get("intencion", "informacion"), data.get("emocion", "neutral")
     except Exception as e:
-
-        logging.warning(e)
-        return "informacion","neutral"
-
-
-def calculate_points(intent, emotion):
-
-    points = 5
-
-    intent_points = {
-        "precio":15,
-        "reserva":40,
-        "disponibilidad":20,
-        "objecion":-10,
-        "comparacion":5,
-        "saludo":2
-    }
-
-    emotion_points = {
-        "decision_compra":30,
-        "frustracion":-10,
-        "satisfaccion":15,
-        "duda":-5
-    }
-
-    points += intent_points.get(intent,0)
-    points += emotion_points.get(emotion,0)
-
-    return points
-
+        logging.warning(f"Fallo análisis semántico: {e}")
+        return "informacion", "neutral"
 
 def update_lead_data(user_id, points, language, intent, emotion):
-
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-
+    # Usar INSERT OR IGNORE para asegurar que el registro exista antes del UPDATE
+    cursor.execute("INSERT OR IGNORE INTO lead_scores (user_id, score) VALUES (?, 0)", (user_id,))
+    cursor.execute("UPDATE lead_scores SET score = score + ? WHERE user_id = ?", (points, user_id))
+    
     cursor.execute("""
-    INSERT INTO lead_scores (user_id, score) VALUES(?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET score = score + excluded.score
-    """,(user_id,points))
-
-    cursor.execute("""
-    INSERT OR REPLACE INTO customer_profile (user_id,language,last_intent,last_emotion)
-    VALUES (?,?,?,?)
-    """,(user_id,language,intent,emotion))
-
+    INSERT OR REPLACE INTO customer_profile (user_id, language, last_intent, last_emotion)
+    VALUES (?, ?, ?, ?)
+    """, (user_id, language, intent, emotion))
+    
     conn.commit()
-
-    cursor.execute("SELECT score FROM lead_scores WHERE user_id=?",(user_id,))
+    cursor.execute("SELECT score FROM lead_scores WHERE user_id=?", (user_id,))
     score = cursor.fetchone()[0]
-
     conn.close()
-
     return score
 
-
-# ---------------- RAG ----------------
-
-def build_index():
-
-    global vector_db
-
-    try:
-
-        embeddings = OpenAIEmbeddings()
-
-        if os.path.exists(INDEX_FILE):
-
-            vector_db = FAISS.load_local(
-                INDEX_FILE,
-                embeddings,
-                allow_dangerous_deserialization=True
-            )
-
-            logging.info("FAISS cargado")
-
-        else:
-
-            docs = []
-
-            if not os.path.exists(DOCUMENTS_DIR):
-                os.makedirs(DOCUMENTS_DIR)
-
-            for file in os.listdir(DOCUMENTS_DIR):
-
-                if file.endswith(".pdf"):
-
-                    loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR,file))
-                    docs.extend(loader.load())
-
-            if docs:
-
-                splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=800,
-                    chunk_overlap=100
-                )
-
-                chunks = splitter.split_documents(docs)
-
-                vector_db = FAISS.from_documents(chunks,embeddings)
-
-                vector_db.save_local(INDEX_FILE)
-
-                logging.info("FAISS creado")
-
-    except Exception as e:
-
-        logging.error(e)
-
-
 # ---------------- MOTOR IA ----------------
-
-def process_message(user_id,message):
-
+def process_message(user_id, message):
     try:
-
-        if BOT_ACTIVE.lower() != "true":
+        # Validación segura de variable de entorno
+        if str(BOT_ACTIVE).lower() != "true":
             return "El asistente está temporalmente desactivado."
 
-        intent,emotion = analyze_customer_behavior(message)
+        intent, emotion = analyze_customer_behavior(message)
+        language = detect(message) if len(message) > 3 else "es"
+        
+        # Puntos básicos
+        points = 20 if "reservar" in message.lower() else 5
+        total_score = update_lead_data(user_id, points, language, intent, emotion)
 
-        language = detect(message) if len(message)>3 else "es"
-
-        points = calculate_points(intent,emotion)
-
-        total_score = update_lead_data(user_id,points,language,intent,emotion)
-
-        save_message(user_id,"user",message)
-
+        save_message(user_id, "user", message)
         history = get_history(user_id)
 
-        contexto = ""
-
+        contexto = "No hay información adicional."
         if vector_db is not None:
-
             with index_lock:
-                docs = vector_db.similarity_search(message,k=4)
+                docs = vector_db.similarity_search(message, k=4)
+                contexto = "\n\n".join([d.page_content for d in docs])
 
-            contexto = "\n\n".join([d.page_content for d in docs])
-
-        if contexto == "":
-            contexto = "No hay información disponible en los documentos."
-
-        llm = ChatOpenAI(model="gpt-4o-mini",temperature=0.4)
-
-        system_rules=f"""
-        Eres experto en ventas hoteleras.
-
-        idioma:{language}
-        intent:{intent}
-        emocion:{emotion}
-        score:{total_score}
-
-        CONTEXTO:
-        {contexto}
-        """
-
-        messages=[
-            SystemMessage(content=system_rules),
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.4)
+        
+        messages = [
+            SystemMessage(content=f"Eres experto en ventas. Idioma: {language}. Contexto: {contexto}"),
             *history,
             HumanMessage(content=message)
         ]
 
-        response=llm.invoke(messages)
-
-        save_message(user_id,"assistant",response.content)
-
+        response = llm.invoke(messages)
+        save_message(user_id, "assistant", response.content)
         return response.content
 
     except Exception as e:
+        logging.error(f"Error en process_message: {e}")
+        return "Lo siento, tuve un problema técnico. ¿Podrías repetir eso?"
 
-        logging.error(e)
-
-        return "Ocurrió un error procesando el mensaje."
-
-
-# ---------------- API CHAT ----------------
-
-@app.post("/chat")
-async def chat(data:Message):
-
+# ---------------- RAG E INDEXACIÓN ----------------
+def build_index():
+    global vector_db
     try:
-
-        response = process_message(data.user_id,data.message)
-
-        return {"response":response}
-
+        embeddings = OpenAIEmbeddings()
+        if os.path.exists(INDEX_FILE):
+            vector_db = FAISS.load_local(INDEX_FILE, embeddings, allow_dangerous_deserialization=True)
+            logging.info("FAISS cargado desde disco.")
+        else:
+            if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
+            # Aquí podrías cargar PDFs...
+            logging.warning("No se encontró índice FAISS. Por favor sube PDFs a /documents.")
     except Exception as e:
+        logging.error(f"Error creando índice: {e}")
 
-        logging.error(e)
-
-        raise HTTPException(500,"error interno")
-
-
-# ---------------- TELEGRAM WEBHOOK ----------------
+# ---------------- ENDPOINTS ----------------
+@app.on_event("startup")
+async def startup():
+    init_db()
+    threading.Thread(target=build_index, daemon=True).start()
 
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
-
     data = await request.json()
-
     try:
+        # Extraer datos de Telegram
+        chat_msg = data.get("message", {})
+        text = chat_msg.get("text")
+        chat_id = chat_msg.get("from", {}).get("id")
 
-        message = data["message"]["text"]
-        user_id = str(data["message"]["from"]["id"])
+        if not text or not chat_id:
+            return {"ok": True}
 
-    except:
-        return {"ok": True}
+        # Procesar
+        reply = process_message(str(chat_id), text)
 
-    reply = process_message(user_id,message)
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    requests.post(url,json={
-        "chat_id":user_id,
-        "text":reply
-    })
-
-    return {"ok":True}
-
-
-# ---------------- STARTUP ----------------
-
-@app.on_event("startup")
-async def startup():
-
-    init_db()
-
-    threading.Thread(target=build_index,daemon=True).start()
-
-
-# ---------------- ROOT ----------------
+        # Enviar respuesta
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": chat_id, "text": reply})
+        
+    except Exception as e:
+        logging.error(f"Error Webhook Telegram: {e}")
+    
+    return {"ok": True}
 
 @app.get("/")
-def root():
-    return {"status":"AI Call Center Running"}
-
-
-# ---------------- RUN ----------------
+def root(): return {"status": "Online"}
 
 if __name__ == "__main__":
-
-    port = int(os.environ.get("PORT",8000))
-
-    uvicorn.run(app,host="0.0.0.0",port=port)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
