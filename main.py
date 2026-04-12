@@ -21,13 +21,11 @@ from langdetect import detect
 # ---------------- CONFIGURACIÓN ----------------
 load_dotenv()
 
-# TOKEN Y VARIABLES DE RAILWAY
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# Usamos un valor por defecto seguro para evitar errores de NoneType
 BOT_ACTIVE = os.getenv("BOT_ACTIVE", "true")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-app = FastAPI(title="AI Call Center Pro")
+app = FastAPI(title="AI Hotel Booking Agent")
 
 INDEX_FILE = "hotel_faiss_index"
 DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
@@ -96,11 +94,9 @@ def get_history(user_id, limit=8):
             history.append(AIMessage(content=message))
     return history
 
-# ---------------- ANALÍTICA MEJORADA ----------------
+# ---------------- ANALÍTICA ----------------
 def analyze_customer_behavior(message):
     llm_analyst = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    
-    # Prompt más estricto para evitar texto basura fuera del JSON
     prompt = f"""
     Analiza el siguiente mensaje y responde ÚNICAMENTE con el JSON.
     Mensaje: "{message}"
@@ -108,7 +104,6 @@ def analyze_customer_behavior(message):
     """
     try:
         response = llm_analyst.invoke(prompt)
-        # Limpieza de Markdown si la IA lo incluye
         clean_content = response.content.strip().replace("```json", "").replace("```", "")
         data = json.loads(clean_content)
         return data.get("intencion", "informacion"), data.get("emocion", "neutral")
@@ -119,48 +114,65 @@ def analyze_customer_behavior(message):
 def update_lead_data(user_id, points, language, intent, emotion):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-    # Usar INSERT OR IGNORE para asegurar que el registro exista antes del UPDATE
     cursor.execute("INSERT OR IGNORE INTO lead_scores (user_id, score) VALUES (?, 0)", (user_id,))
     cursor.execute("UPDATE lead_scores SET score = score + ? WHERE user_id = ?", (points, user_id))
-    
     cursor.execute("""
     INSERT OR REPLACE INTO customer_profile (user_id, language, last_intent, last_emotion)
     VALUES (?, ?, ?, ?)
     """, (user_id, language, intent, emotion))
-    
     conn.commit()
     cursor.execute("SELECT score FROM lead_scores WHERE user_id=?", (user_id,))
     score = cursor.fetchone()[0]
     conn.close()
     return score
 
-# ---------------- MOTOR IA ----------------
+# ---------------- MOTOR IA (CORREGIDO) ----------------
 def process_message(user_id, message):
     try:
-        # Validación segura de variable de entorno
         if str(BOT_ACTIVE).lower() != "true":
             return "El asistente está temporalmente desactivado."
 
         intent, emotion = analyze_customer_behavior(message)
         language = detect(message) if len(message) > 3 else "es"
         
-        # Puntos básicos
-        points = 20 if "reservar" in message.lower() else 5
+        # Puntos de interés comercial
+        points = 25 if intent in ["reserva", "precio", "disponibilidad"] else 5
         total_score = update_lead_data(user_id, points, language, intent, emotion)
 
         save_message(user_id, "user", message)
         history = get_history(user_id)
 
-        contexto = "No hay información adicional."
+        # Búsqueda de información en PDFs
+        contexto = ""
         if vector_db is not None:
             with index_lock:
                 docs = vector_db.similarity_search(message, k=4)
                 contexto = "\n\n".join([d.page_content for d in docs])
 
+        if not contexto:
+            contexto = "No hay detalles específicos en los documentos, pero intenta ser servicial y pide datos para contactar al cliente."
+
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.4)
         
+        # MEJORA DEL SYSTEM PROMPT: Personalidad de Vendedor
+        system_rules = f"""
+        Eres el Asistente Virtual de Reservas oficial. Tu única misión es informar y VENDER habitaciones o servicios basándote en la información de los documentos.
+
+        DIRECTRICES DE COMPORTAMIENTO:
+        1. Identidad: Eres parte del equipo del hotel/negocio, no un consultor externo de ventas. 
+        2. Proactividad: Si el cliente saluda, dale la bienvenida con entusiasmo y menciona algo atractivo que esté en el contexto.
+        3. Uso de Datos: Extrae precios, tipos de habitación y amenidades directamente del CONTEXTO proporcionado abajo.
+        4. Cierre de Venta: Si el score del cliente ({total_score}) es mayor a 60, solicita amablemente sus fechas de viaje y correo para formalizar.
+        5. Idioma: Responde siempre en {language}.
+
+        REGLA DE ORO: No preguntes "en qué aspecto de ventas necesitas ayuda". Pregunta "¿Cuándo te gustaría hospedarte con nosotros?" o "¿Qué tipo de habitación buscas?".
+
+        CONTEXTO DISPONIBLE:
+        {contexto}
+        """
+
         messages = [
-            SystemMessage(content=f"Eres experto en ventas. Idioma: {language}. Contexto: {contexto}"),
+            SystemMessage(content=system_rules),
             *history,
             HumanMessage(content=message)
         ]
@@ -171,7 +183,7 @@ def process_message(user_id, message):
 
     except Exception as e:
         logging.error(f"Error en process_message: {e}")
-        return "Lo siento, tuve un problema técnico. ¿Podrías repetir eso?"
+        return "Lo siento, tuve un inconveniente técnico. ¿Me puedes repetir tu pregunta?"
 
 # ---------------- RAG E INDEXACIÓN ----------------
 def build_index():
@@ -180,13 +192,26 @@ def build_index():
         embeddings = OpenAIEmbeddings()
         if os.path.exists(INDEX_FILE):
             vector_db = FAISS.load_local(INDEX_FILE, embeddings, allow_dangerous_deserialization=True)
-            logging.info("FAISS cargado desde disco.")
+            logging.info("FAISS cargado.")
         else:
             if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
-            # Aquí podrías cargar PDFs...
-            logging.warning("No se encontró índice FAISS. Por favor sube PDFs a /documents.")
+            docs = []
+            for file in os.listdir(DOCUMENTS_DIR):
+                if file.endswith(".pdf"):
+                    logging.info(f"Procesando PDF: {file}")
+                    loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, file))
+                    docs.extend(loader.load())
+            
+            if docs:
+                splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+                chunks = splitter.split_documents(docs)
+                vector_db = FAISS.from_documents(chunks, embeddings)
+                vector_db.save_local(INDEX_FILE)
+                logging.info("Nuevo índice FAISS creado exitosamente.")
+            else:
+                logging.warning("No hay PDFs en la carpeta /documents. Sube archivos para que la IA tenga información.")
     except Exception as e:
-        logging.error(f"Error creando índice: {e}")
+        logging.error(f"Error en build_index: {e}")
 
 # ---------------- ENDPOINTS ----------------
 @app.on_event("startup")
@@ -198,28 +223,20 @@ async def startup():
 async def telegram_webhook(request: Request):
     data = await request.json()
     try:
-        # Extraer datos de Telegram
         chat_msg = data.get("message", {})
         text = chat_msg.get("text")
-        chat_id = chat_msg.get("from", {}).get("id")
+        chat_id = chat_msg.get("chat", {}).get("id")
 
-        if not text or not chat_id:
-            return {"ok": True}
-
-        # Procesar
-        reply = process_message(str(chat_id), text)
-
-        # Enviar respuesta
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": chat_id, "text": reply})
-        
+        if text and chat_id:
+            reply = process_message(str(chat_id), text)
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            requests.post(url, json={"chat_id": chat_id, "text": reply})
     except Exception as e:
-        logging.error(f"Error Webhook Telegram: {e}")
-    
+        logging.error(f"Error Webhook: {e}")
     return {"ok": True}
 
 @app.get("/")
-def root(): return {"status": "Online"}
+def root(): return {"status": "AI Booking Agent is Online"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
