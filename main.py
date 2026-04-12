@@ -126,7 +126,7 @@ def update_lead_data(user_id, points, language, intent, emotion):
     conn.close()
     return score
 
-# ---------------- MOTOR IA (CORREGIDO) ----------------
+# ---------------- MOTOR IA ----------------
 def process_message(user_id, message):
     try:
         if str(BOT_ACTIVE).lower() != "true":
@@ -135,14 +135,12 @@ def process_message(user_id, message):
         intent, emotion = analyze_customer_behavior(message)
         language = detect(message) if len(message) > 3 else "es"
         
-        # Puntos de interés comercial
         points = 25 if intent in ["reserva", "precio", "disponibilidad"] else 5
         total_score = update_lead_data(user_id, points, language, intent, emotion)
 
         save_message(user_id, "user", message)
         history = get_history(user_id)
 
-        # Búsqueda de información en PDFs
         contexto = ""
         if vector_db is not None:
             with index_lock:
@@ -150,40 +148,23 @@ def process_message(user_id, message):
                 contexto = "\n\n".join([d.page_content for d in docs])
 
         if not contexto:
-            contexto = "No hay detalles específicos en los documentos, pero intenta ser servicial y pide datos para contactar al cliente."
+            contexto = "No hay detalles específicos en los documentos."
 
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.4)
         
-        # MEJORA DEL SYSTEM PROMPT: Personalidad de Vendedor
         system_rules = f"""
-        Eres el Asistente Virtual de Reservas oficial. Tu única misión es informar y VENDER habitaciones o servicios basándote en la información de los documentos.
-
-        DIRECTRICES DE COMPORTAMIENTO:
-        1. Identidad: Eres parte del equipo del hotel/negocio, no un consultor externo de ventas. 
-        2. Proactividad: Si el cliente saluda, dale la bienvenida con entusiasmo y menciona algo atractivo que esté en el contexto.
-        3. Uso de Datos: Extrae precios, tipos de habitación y amenidades directamente del CONTEXTO proporcionado abajo.
-        4. Cierre de Venta: Si el score del cliente ({total_score}) es mayor a 60, solicita amablemente sus fechas de viaje y correo para formalizar.
-        5. Idioma: Responde siempre en {language}.
-
-        REGLA DE ORO: No preguntes "en qué aspecto de ventas necesitas ayuda". Pregunta "¿Cuándo te gustaría hospedarte con nosotros?" o "¿Qué tipo de habitación buscas?".
-
-        CONTEXTO DISPONIBLE:
-        {contexto}
+        Eres el Asistente Virtual de Reservas oficial. Tu misión es VENDER usando el CONTEXTO.
+        Score cliente: {total_score}. Idioma: {language}.
+        CONTEXTO: {contexto}
         """
 
-        messages = [
-            SystemMessage(content=system_rules),
-            *history,
-            HumanMessage(content=message)
-        ]
-
+        messages = [SystemMessage(content=system_rules), *history, HumanMessage(content=message)]
         response = llm.invoke(messages)
         save_message(user_id, "assistant", response.content)
         return response.content
-
     except Exception as e:
         logging.error(f"Error en process_message: {e}")
-        return "Lo siento, tuve un inconveniente técnico. ¿Me puedes repetir tu pregunta?"
+        return "Lo siento, tuve un inconveniente técnico."
 
 # ---------------- RAG E INDEXACIÓN ----------------
 def build_index():
@@ -198,45 +179,65 @@ def build_index():
             docs = []
             for file in os.listdir(DOCUMENTS_DIR):
                 if file.endswith(".pdf"):
-                    logging.info(f"Procesando PDF: {file}")
                     loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, file))
                     docs.extend(loader.load())
-            
             if docs:
                 splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
                 chunks = splitter.split_documents(docs)
                 vector_db = FAISS.from_documents(chunks, embeddings)
                 vector_db.save_local(INDEX_FILE)
-                logging.info("Nuevo índice FAISS creado exitosamente.")
-            else:
-                logging.warning("No hay PDFs en la carpeta /documents. Sube archivos para que la IA tenga información.")
+                logging.info("Índice FAISS creado.")
     except Exception as e:
-        logging.error(f"Error en build_index: {e}")
+        logging.error(f"Error build_index: {e}")
 
 # ---------------- ENDPOINTS ----------------
-@app.on_event("startup")
-async def startup():
-    init_db()
-    threading.Thread(target=build_index, daemon=True).start()
+
+@app.get("/")
+def root(): return {"status": "AI Booking Agent Online"}
 
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
     data = await request.json()
     try:
-        chat_msg = data.get("message", {})
-        text = chat_msg.get("text")
-        chat_id = chat_msg.get("chat", {}).get("id")
-
-        if text and chat_id:
+        # Corrección: Telegram envía el chat_id en data['message']['chat']['id']
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
+        if text:
             reply = process_message(str(chat_id), text)
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            requests.post(url, json={"chat_id": chat_id, "text": reply})
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                          json={"chat_id": chat_id, "text": reply})
     except Exception as e:
-        logging.error(f"Error Webhook: {e}")
+        logging.error(f"Error Telegram: {e}")
     return {"ok": True}
 
-@app.get("/")
-def root(): return {"status": "AI Booking Agent is Online"}
+# --- ENDPOINT PARA VAPI (ESTO ES LO QUE TE FALTABA) ---
+@app.post("/vapi-webhook")
+async def vapi_webhook(request: Request):
+    data = await request.json()
+    try:
+        # Vapi envía los argumentos de la función en toolCalls
+        message_data = data.get("message", {})
+        tool_calls = message_data.get("toolCalls", [])
+        
+        if tool_calls:
+            tool_call = tool_calls[0]
+            args = tool_call.get("function", {}).get("arguments", {})
+            # Buscamos 'query' o 'message' según cómo lo configuraste en Vapi
+            user_query = args.get("query") or args.get("message") or ""
+            
+            if user_query:
+                # Procesamos con RAG
+                respuesta = process_message("vapi_call", user_query)
+                return {"results": [{"toolCallId": tool_call.get("id"), "result": respuesta}]}
+    except Exception as e:
+        logging.error(f"Error Vapi: {e}")
+    return {"ok": True}
+
+# ---------------- STARTUP ----------------
+@app.on_event("startup")
+async def startup():
+    init_db()
+    threading.Thread(target=build_index, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
