@@ -6,12 +6,9 @@ import threading
 import json
 import asyncio
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from dotenv import load_dotenv
-
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -21,19 +18,16 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from langdetect import detect
 
-
 # ---------------- CONFIGURACIÓN ----------------
 
 load_dotenv()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# VARIABLE PARA ACTIVAR / DESACTIVAR BOT
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BOT_ACTIVE = os.getenv("BOT_ACTIVE", "true")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-app = FastAPI(title="AI Call Center Pro - Lead Scoring & Emotion AI")
+app = FastAPI(title="AI Call Center Pro")
 
 INDEX_FILE = "hotel_faiss_index"
 DOCUMENTS_DIR = os.path.join(os.getcwd(), "documents")
@@ -133,7 +127,7 @@ def analyze_customer_behavior(message):
     llm_analyst = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
     prompt = f"""
-    Analiza el siguiente mensaje.
+    Analiza el siguiente mensaje de cliente.
 
     Mensaje: "{message}"
 
@@ -251,8 +245,6 @@ def build_index():
 
                 vector_db.save_local(INDEX_FILE)
 
-        logging.info("Base de conocimiento cargada")
-
     except Exception as e:
 
         logging.error(e)
@@ -262,12 +254,8 @@ def build_index():
 
 def process_message(user_id,message):
 
-    # BOT APAGADO
     if BOT_ACTIVE.lower() != "true":
         return "El asistente está temporalmente desactivado."
-
-    if vector_db is None:
-        return "Inicializando conocimiento..."
 
     intent,emotion = analyze_customer_behavior(message)
 
@@ -296,8 +284,6 @@ def process_message(user_id,message):
     emocion:{emotion}
     score:{total_score}
 
-    Usa el contexto para responder.
-
     CONTEXTO:
     {contexto}
     """
@@ -320,6 +306,9 @@ def process_message(user_id,message):
 @app.post("/chat")
 async def chat(data:Message):
 
+    if vector_db is None:
+        return {"response":"Inicializando IA"}
+
     try:
 
         response = process_message(data.user_id,data.message)
@@ -332,35 +321,33 @@ async def chat(data:Message):
         raise HTTPException(500,"error interno")
 
 
-# ---------------- TELEGRAM BOT ----------------
+# ---------------- TELEGRAM WEBHOOK ----------------
 
-async def telegram_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
+@app.post("/telegram")
+async def telegram_webhook(request: Request):
 
-    if not update.message or not update.message.text:
-        return
+    data = await request.json()
 
-    user_id = str(update.message.from_user.id)
-    message = update.message.text
+    try:
+
+        message = data["message"]["text"]
+        user_id = str(data["message"]["from"]["id"])
+
+    except:
+        return {"ok": True}
 
     reply = process_message(user_id,message)
 
-    await update.message.reply_text(reply)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
+    import requests
 
-async def start_telegram_bot():
+    requests.post(url,json={
+        "chat_id":user_id,
+        "text":reply
+    })
 
-    if not TELEGRAM_TOKEN:
-
-        logging.warning("No TELEGRAM_BOT_TOKEN definido")
-        return
-
-    bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    bot.add_handler(MessageHandler(filters.TEXT,telegram_message))
-
-    logging.info("Telegram bot iniciado")
-
-    await bot.run_polling()
+    return {"ok":True}
 
 
 # ---------------- STARTUP ----------------
@@ -372,7 +359,12 @@ async def startup():
 
     threading.Thread(target=build_index,daemon=True).start()
 
-    asyncio.create_task(start_telegram_bot())
+
+# ---------------- ROOT ----------------
+
+@app.get("/")
+def root():
+    return {"status":"AI Call Center Running"}
 
 
 # ---------------- RUN ----------------
