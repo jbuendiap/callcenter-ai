@@ -78,7 +78,7 @@ def process_message(user_id, message):
         if vector_db is not None:
             with index_lock:
                 # Buscamos con puntuación de relevancia para filtrar basura
-                docs_with_score = vector_db.similarity_search_with_relevance_scores(message, k=15)
+                docs_with_score = vector_db.similarity_search_with_relevance_scores(message, k=8)
                 
                 # Solo usamos documentos con una relevancia aceptable (> 0.6)
                 contexto_encontrado = "\n\n".join([
