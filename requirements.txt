@@ -1,16 +1,22 @@
+# Servidor y API
 fastapi
 uvicorn
-pydantic
+python-dotenv
+
+# Motores de IA y LangChain
 langchain
 langchain-community
-langchain-openai
-langchain-text-splitters
 langchain-core
+langchain-text-splitters
+langchain-openai
+langchain-anthropic
+
+# Procesamiento de Documentos y Vectores
 pypdf
 faiss-cpu
-openai
 tiktoken
+
+# Utilidades
 langdetect
 sqlite-utils
 python-telegram-bot
-python-dotenv
