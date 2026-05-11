@@ -3,12 +3,12 @@ import uvicorn
 import sqlite3
 import logging
 import threading
-import shutil
+import json
 
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 
-# Cambiamos a las librerías de Google Generative AI
+# Librerías de Google Generative AI
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -22,31 +22,29 @@ DetectorFactory.seed = 0
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-app = FastAPI(title="Forex AI Agent - Gemini & Antigravity Powered")
+app = FastAPI(title="Hotel AI Concierge - Gemini Powered")
 
 # --- CONFIGURACIÓN DE RUTAS ---
-INDEX_FILE = "sales_faiss_index"
 DOCUMENTS_DIR = "documents"
-DATABASE = "memory.db"
+DATABASE = "hotel_memory.db" # Cambiado para no chocar con Forex
 
-# --- ESTRATEGIA DE ACENTOS POR PAÍS ---
+# --- ESTRATEGIA DE ACENTOS PARA HOTELES (Hospitalidad) ---
 COUNTRY_ADAPTATION = {
-    "ar": {"acento": "argentino", "jerga": "Usa 'plata', 'che', 'vos'. Sé directo y seguro."},
-    "mx": {"acento": "mexicano", "jerga": "Usa 'lana', 'platicar', 'ahorita'. Sé muy cordial."},
-    "es": {"acento": "español de España", "jerga": "Usa 'vale', 'venga', 'invertir'. Sé rápido y profesional."},
-    "uy": {"acento": "uruguayo", "jerga": "Usa 'bo', 'ta', 'dinero'. Sé cercano y confiable."},
-    "default": {"acento": "neutro", "jerga": "Usa un español profesional estándar."}
+    "ar": {"acento": "argentino", "jerga": "Usa 'con gusto', 'che', 'vos'. Sé servicial pero elegante."},
+    "mx": {"acento": "mexicano", "jerga": "Usa 'mandé', 'con mucho gusto', 'ahorita'. Sé muy atento."},
+    "es": {"acento": "español de España", "jerga": "Usa 'vale', 'dígame', 'estancia'. Sé eficiente y cortés."},
+    "default": {"acento": "neutro", "jerga": "Usa un español de hospitalidad estándar y formal."}
 }
 
 vector_db = None
 index_lock = threading.Lock()
 
-# ---------------- BASE DE DATOS (Memoria Local) ----------------
+# ---------------- BASE DE DATOS (Memoria del Huésped) ----------------
 def init_db():
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS conversations (
+        CREATE TABLE IF NOT EXISTS hotel_convs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
             user_id TEXT, role TEXT, message TEXT, 
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -58,23 +56,22 @@ def init_db():
 def save_message(user_id, role, message):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO conversations (user_id, role, message) VALUES (?, ?, ?)", (user_id, role, message))
+    cursor.execute("INSERT INTO hotel_convs (user_id, role, message) VALUES (?, ?, ?)", (user_id, role, message))
     conn.commit()
     conn.close()
 
 def get_history(user_id, limit=4):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-    cursor.execute("SELECT role, message FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
+    cursor.execute("SELECT role, message FROM hotel_convs WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
     rows = cursor.fetchall()
     conn.close()
     rows.reverse()
     return [HumanMessage(content=m) if r == "user" else AIMessage(content=m) for r, m in rows]
 
-# ---------------- MOTOR GEMINI 1.5 FLASH (Alta Velocidad) ----------------
-def process_message(user_id, message, country_code="default"):
+# ---------------- MOTOR GEMINI (Específico Hotel) ----------------
+def process_hotel_message(user_id, message, country_code="default"):
     try:
-        # 1. Detectar idioma/país para el tono
         lang = country_code if country_code != "default" else "es"
         try: 
             if country_code == "default": lang = detect(message)
@@ -82,30 +79,29 @@ def process_message(user_id, message, country_code="default"):
 
         style = COUNTRY_ADAPTATION.get(lang, COUNTRY_ADAPTATION["default"])
 
-        # 2. RAG: Buscar info en tus PDFs de Forex
+        # RAG: Buscar en los PDFs de la carpeta 'documents' (Hoteles)
         contexto = ""
         if vector_db is not None:
             with index_lock:
+                # Busca información relevante en hotel_info.pdf, etc.
                 docs = vector_db.similarity_search(message, k=2)
                 contexto = "\n".join([d.page_content for d in docs])
 
-        # 3. Configurar Gemini (Cerebro de la llamada)
-        # Asegúrate de tener GOOGLE_API_KEY en tu .env o Railway Variables
         llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
-            temperature=0.6,
-            max_output_tokens=100 # Respuestas cortas = Conversación fluida
+            temperature=0.4, # Menos creativo, más preciso con datos del hotel
+            max_output_tokens=120
         )
 
         system_prompt = f"""
-        PERSONALIDAD: Eres Juan Esteban, experto en Forex. 
-        TONO: Tienes acento {style['acento']}. {style['jerga']}
+        PERSONALIDAD: Eres el Asistente de Recepción de nuestro Hotel.
+        TONO: Acento {style['acento']}. {style['jerga']} Sé extremadamente educado.
         
-        TAREA: Convence al cliente de la oportunidad de inversión sin sonar desesperado.
-        REGLA DE ORO: Máximo 15-20 palabras por respuesta. Si el cliente duda, usa el CONTEXTO.
+        TAREA: Responde preguntas sobre servicios, horarios y reservas usando el CONTEXTO.
+        REGLA DE ORO: Máximo 25 palabras. Si no sabes algo por el contexto, ofrece ayuda humana.
 
-        CONTEXTO REAL DE TUS DOCUMENTOS:
-        {contexto if contexto else "Usa tus habilidades de persuasión general en Forex."}
+        INFORMACIÓN DEL HOTEL (CONTEXTO):
+        {contexto if contexto else "Ofrece una bienvenida cordial y pregunta en qué puedes ayudar."}
         """
 
         history = get_history(user_id)
@@ -118,18 +114,18 @@ def process_message(user_id, message, country_code="default"):
         return response.content
 
     except Exception as e:
-        logging.error(f"Error en Gemini: {e}")
-        return "Disculpe, la señal está fallando un poco. ¿Qué me decía sobre la inversión?"
+        logging.error(f"Error en Hotel: {e}")
+        return "Bienvenido a recepción. ¿En qué puedo asistirle?"
 
-# ---------------- INDEXACIÓN (Tus PDFs de Estrategia) ----------------
+# ---------------- INDEXACIÓN (Busca tus archivos en /documents) ----------------
 def build_index():
     global vector_db
     try:
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        
         if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
         
         all_docs = []
+        # Esto leerá automáticamente hotel_info.pdf y los otros que tienes en la captura
         for file in os.listdir(DOCUMENTS_DIR):
             if file.endswith(".pdf"):
                 loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, file))
@@ -140,26 +136,40 @@ def build_index():
             chunks = splitter.split_documents(all_docs)
             with index_lock:
                 vector_db = FAISS.from_documents(chunks, embeddings)
-                logging.info("--- DOCUMENTOS DE FOREX INDEXADOS CORRECTAMENTE ---")
+                logging.info("--- DOCUMENTOS DE HOTELES CARGADOS ---")
     except Exception as e:
-        logging.error(f"Error indexando: {e}")
+        logging.error(f"Error cargando documentos: {e}")
 
-# ---------------- WEBHOOK PARA VAPI ----------------
+# ---------------- WEBHOOK VAPI ----------------
 @app.post("/vapi-webhook")
 async def vapi_webhook(request: Request):
-    data = await request.json()
-    
-    # Intentamos obtener el país del lead desde Vapi
-    customer_info = data.get("message", {}).get("customer", {})
-    country = customer_info.get("country", "default").lower()
+    try:
+        data = await request.json()
+        message_data = data.get("message", {})
 
-    if "message" in data and "toolCalls" in data["message"]:
-        tc = data["message"]["toolCalls"][0]
-        query = tc.get("function", {}).get("arguments", {}).get("query", "")
-        
-        respuesta = process_message("vapi_user", query, country_code=country)
-        
-        return {"results": [{"toolCallId": tc.get("id"), "result": respuesta}]}
+        if "toolCalls" in message_data:
+            tc = message_data["toolCalls"][0]
+            args = tc.get("function", {}).get("arguments", {})
+            
+            if isinstance(args, str): args = json.loads(args)
+            
+            query = args.get("query", "")
+            customer_info = message_data.get("customer", {})
+            country = customer_info.get("country", "default").lower()
+
+            respuesta = process_hotel_message("vapi_hotel_user", query, country_code=country)
+            
+            return {
+                "results": [
+                    {
+                        "toolCallId": tc.get("id"),
+                        "result": respuesta 
+                    }
+                ]
+            }
+    except Exception as e:
+        logging.error(f"Error Webhook Hotel: {e}")
+        return {"error": str(e)}
     
     return {"ok": True}
 
@@ -170,8 +180,9 @@ async def startup():
 
 @app.get("/")
 def health_check():
-    return {"status": "Vendedor Forex Activo", "model": "Gemini 1.5 Flash"}
+    return {"status": "Recepción Online", "port": "8080"}
 
 if __name__ == "__main__":
+    # Asegurando el puerto 8080 para Railway
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
