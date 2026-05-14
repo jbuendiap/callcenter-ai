@@ -8,7 +8,7 @@ import json
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 
-# --- CAMBIO A OPENAI SEGÚN TU IMAGEN ---
+# --- LIBRERÍAS DE OPENAI (Detectan OPENAI_API_KEY por defecto) ---
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -21,26 +21,28 @@ from langdetect import detect, DetectorFactory
 DetectorFactory.seed = 0
 load_dotenv()
 
+# Configuración de Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-app = FastAPI(title="Hotel AI Concierge - Powered by OpenAI")
+app = FastAPI(title="Hotel AI Concierge - Standard Config")
 
 # --- CONFIGURACIÓN DE RUTAS ---
 DOCUMENTS_DIR = "documents"
 DATABASE = "hotel_memory.db"
 
-# --- ESTRATEGIA DE ACENTOS ---
+# --- ESTRATEGIA DE ACENTOS (Hospitalidad) ---
 COUNTRY_ADAPTATION = {
-    "ar": {"acento": "argentino", "jerga": "Usa 'con gusto', 'che', 'vos'. Sé servicial pero elegante."},
-    "mx": {"acento": "mexicano", "jerga": "Usa 'mandé', 'con mucho gusto', 'ahorita'. Sé muy atento."},
-    "es": {"acento": "español de España", "jerga": "Usa 'vale', 'dígame', 'estancia'. Sé eficiente y cortés."},
-    "default": {"acento": "neutro", "jerga": "Usa un español de hospitalidad estándar y formal."}
+    "ar": {"acento": "argentino", "gerga": "Usa 'con gusto', 'che', 'vos'. Sé servicial pero elegante."},
+    "mx": {"acento": "mexicano", "gerga": "Usa 'mandé', 'con mucho gusto', 'ahorita'. Sé muy atento."},
+    "es": {"acento": "español de España", "gerga": "Usa 'vale', 'dígame', 'estancia'. Sé eficiente y cortés."},
+    "default": {"acento": "neutro", "gerga": "Usa un español de hospitalidad estándar y formal."}
 }
 
 vector_db = None
 index_lock = threading.Lock()
 
-# ---------------- BASE DE DATOS ----------------
+# ---------------- BASE DE DATOS (Memoria del Huésped) ----------------
 def init_db():
+    # check_same_thread=False permite que múltiples hilos accedan a la DB en FastAPI
     conn = sqlite3.connect(DATABASE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
@@ -72,6 +74,7 @@ def get_history(user_id, limit=4):
 # ---------------- MOTOR OPENAI ----------------
 def process_hotel_message(user_id, message, country_code="default"):
     try:
+        # 1. Detección de idioma/acento
         lang = country_code if country_code != "default" else "es"
         try: 
             if country_code == "default": lang = detect(message)
@@ -79,13 +82,14 @@ def process_hotel_message(user_id, message, country_code="default"):
 
         style = COUNTRY_ADAPTATION.get(lang, COUNTRY_ADAPTATION["default"])
 
+        # 2. RAG: Búsqueda de información en los documentos subidos
         contexto = ""
         if vector_db is not None:
             with index_lock:
                 docs = vector_db.similarity_search(message, k=2)
                 contexto = "\n".join([d.page_content for d in docs])
 
-        # Usa OPENAI_API_KEY de tu imagen automáticamente
+        # 3. LLM: Se inicializa y busca automáticamente os.getenv("OPENAI_API_KEY")
         llm = ChatOpenAI(
             model="gpt-4o-mini",
             temperature=0.4,
@@ -94,34 +98,37 @@ def process_hotel_message(user_id, message, country_code="default"):
 
         system_prompt = f"""
         PERSONALIDAD: Eres el Asistente de Recepción de nuestro Hotel.
-        TONO: Acento {style['acento']}. {style['jerga']} Sé extremadamente educado.
+        TONO: Acento {style['acento']}. {style['gerga']} Sé extremadamente educado.
         
-        TAREA: Responde preguntas sobre servicios, horarios y reservas usando el CONTEXTO.
-        REGLA DE ORO: Máximo 25 palabras. Si no sabes algo por el contexto, ofrece ayuda humana.
+        TAREA: Responde preguntas sobre servicios, horarios y reservas usando el CONTEXTO proporcionado.
+        REGLA DE ORO: Máximo 25 palabras. Si no tienes la información, ofrece pasar la consulta a un humano.
 
         INFORMACIÓN DEL HOTEL (CONTEXTO):
-        {contexto if contexto else "Ofrece una bienvenida cordial y pregunta en qué puedes ayudar."}
+        {contexto if contexto else "Bienvenido a nuestro hotel, ¿en qué puedo asistirle hoy?"}
         """
 
         history = get_history(user_id)
         messages = [SystemMessage(content=system_prompt), *history, HumanMessage(content=message)]
         
         response = llm.invoke(messages)
+        
+        # Persistencia de la charla
         save_message(user_id, "user", message)
         save_message(user_id, "assistant", response.content)
         
         return response.content
 
     except Exception as e:
-        logging.error(f"Error en Hotel OpenAI: {e}")
-        return "Bienvenido a recepción. ¿En qué puedo asistirle?"
+        logging.error(f"Error en proceso Hotel: {e}")
+        return "Bienvenido a recepción. Hubo un pequeño error, pero dígame, ¿cómo puedo ayudarle?"
 
-# ---------------- INDEXACIÓN (OpenAI Embeddings) ----------------
+# ---------------- INDEXACIÓN DE DOCUMENTOS ----------------
 def build_index():
     global vector_db
     try:
-        # Usa OPENAI_API_KEY de tu imagen
+        # OpenAIEmbeddings también busca automáticamente OPENAI_API_KEY
         embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        
         if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
         
         all_docs = []
@@ -135,11 +142,14 @@ def build_index():
             chunks = splitter.split_documents(all_docs)
             with index_lock:
                 vector_db = FAISS.from_documents(chunks, embeddings)
-                logging.info("--- DOCUMENTOS DE HOTELES INDEXADOS CON OPENAI ---")
-    except Exception as e:
-        logging.error(f"Error indexando documentos: {e}")
+                logging.info("--- DOCUMENTOS INDEXADOS CON ÉXITO ---")
+        else:
+            logging.info("No se encontraron PDFs para indexar en /documents")
 
-# ---------------- WEBHOOK VAPI ----------------
+    except Exception as e:
+        logging.error(f"Error en la indexación: {e}")
+
+# ---------------- WEBHOOK PARA VAPI ----------------
 @app.post("/vapi-webhook")
 async def vapi_webhook(request: Request):
     try:
@@ -148,9 +158,13 @@ async def vapi_webhook(request: Request):
 
         if "toolCalls" in message_data:
             tc = message_data["toolCalls"][0]
-            args = tc.get("function", {}).get("arguments", {})
+            func = tc.get("function", {})
+            args = func.get("arguments", {})
             
-            if isinstance(args, str): args = json.loads(args)
+            # Limpieza de argumentos JSON
+            if isinstance(args, str):
+                try: args = json.loads(args)
+                except: args = {"query": args}
             
             query = args.get("query", "")
             customer_info = message_data.get("customer", {})
@@ -167,7 +181,7 @@ async def vapi_webhook(request: Request):
                 ]
             }
     except Exception as e:
-        logging.error(f"Error Webhook Hotel: {e}")
+        logging.error(f"Error Webhook: {e}")
         return {"error": str(e)}
     
     return {"ok": True}
@@ -175,11 +189,12 @@ async def vapi_webhook(request: Request):
 @app.on_event("startup")
 async def startup():
     init_db()
+    # Ejecución de la carga de documentos en hilo separado
     threading.Thread(target=build_index, daemon=True).start()
 
 @app.get("/")
 def health_check():
-    return {"status": "Recepción Online (OpenAI)", "port": "8080"}
+    return {"status": "Online", "engine": "OpenAI GPT-4o-mini"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
