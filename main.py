@@ -8,8 +8,8 @@ import json
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 
-# Librerías de Google Generative AI
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+# --- CAMBIO A OPENAI SEGÚN TU IMAGEN ---
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
@@ -22,13 +22,13 @@ DetectorFactory.seed = 0
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-app = FastAPI(title="Hotel AI Concierge - Gemini Powered")
+app = FastAPI(title="Hotel AI Concierge - Powered by OpenAI")
 
 # --- CONFIGURACIÓN DE RUTAS ---
 DOCUMENTS_DIR = "documents"
-DATABASE = "hotel_memory.db" # Cambiado para no chocar con Forex
+DATABASE = "hotel_memory.db"
 
-# --- ESTRATEGIA DE ACENTOS PARA HOTELES (Hospitalidad) ---
+# --- ESTRATEGIA DE ACENTOS ---
 COUNTRY_ADAPTATION = {
     "ar": {"acento": "argentino", "jerga": "Usa 'con gusto', 'che', 'vos'. Sé servicial pero elegante."},
     "mx": {"acento": "mexicano", "jerga": "Usa 'mandé', 'con mucho gusto', 'ahorita'. Sé muy atento."},
@@ -39,9 +39,9 @@ COUNTRY_ADAPTATION = {
 vector_db = None
 index_lock = threading.Lock()
 
-# ---------------- BASE DE DATOS (Memoria del Huésped) ----------------
+# ---------------- BASE DE DATOS ----------------
 def init_db():
-    conn = sqlite3.connect(DATABASE)
+    conn = sqlite3.connect(DATABASE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS hotel_convs (
@@ -54,14 +54,14 @@ def init_db():
     conn.close()
 
 def save_message(user_id, role, message):
-    conn = sqlite3.connect(DATABASE)
+    conn = sqlite3.connect(DATABASE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("INSERT INTO hotel_convs (user_id, role, message) VALUES (?, ?, ?)", (user_id, role, message))
     conn.commit()
     conn.close()
 
 def get_history(user_id, limit=4):
-    conn = sqlite3.connect(DATABASE)
+    conn = sqlite3.connect(DATABASE, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT role, message FROM hotel_convs WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
     rows = cursor.fetchall()
@@ -69,7 +69,7 @@ def get_history(user_id, limit=4):
     rows.reverse()
     return [HumanMessage(content=m) if r == "user" else AIMessage(content=m) for r, m in rows]
 
-# ---------------- MOTOR GEMINI (Específico Hotel) ----------------
+# ---------------- MOTOR OPENAI ----------------
 def process_hotel_message(user_id, message, country_code="default"):
     try:
         lang = country_code if country_code != "default" else "es"
@@ -79,18 +79,17 @@ def process_hotel_message(user_id, message, country_code="default"):
 
         style = COUNTRY_ADAPTATION.get(lang, COUNTRY_ADAPTATION["default"])
 
-        # RAG: Buscar en los PDFs de la carpeta 'documents' (Hoteles)
         contexto = ""
         if vector_db is not None:
             with index_lock:
-                # Busca información relevante en hotel_info.pdf, etc.
                 docs = vector_db.similarity_search(message, k=2)
                 contexto = "\n".join([d.page_content for d in docs])
 
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            temperature=0.4, # Menos creativo, más preciso con datos del hotel
-            max_output_tokens=120
+        # Usa OPENAI_API_KEY de tu imagen automáticamente
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0.4,
+            max_tokens=120
         )
 
         system_prompt = f"""
@@ -114,18 +113,18 @@ def process_hotel_message(user_id, message, country_code="default"):
         return response.content
 
     except Exception as e:
-        logging.error(f"Error en Hotel: {e}")
+        logging.error(f"Error en Hotel OpenAI: {e}")
         return "Bienvenido a recepción. ¿En qué puedo asistirle?"
 
-# ---------------- INDEXACIÓN (Busca tus archivos en /documents) ----------------
+# ---------------- INDEXACIÓN (OpenAI Embeddings) ----------------
 def build_index():
     global vector_db
     try:
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        # Usa OPENAI_API_KEY de tu imagen
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
         if not os.path.exists(DOCUMENTS_DIR): os.makedirs(DOCUMENTS_DIR)
         
         all_docs = []
-        # Esto leerá automáticamente hotel_info.pdf y los otros que tienes en la captura
         for file in os.listdir(DOCUMENTS_DIR):
             if file.endswith(".pdf"):
                 loader = PyPDFLoader(os.path.join(DOCUMENTS_DIR, file))
@@ -136,9 +135,9 @@ def build_index():
             chunks = splitter.split_documents(all_docs)
             with index_lock:
                 vector_db = FAISS.from_documents(chunks, embeddings)
-                logging.info("--- DOCUMENTOS DE HOTELES CARGADOS ---")
+                logging.info("--- DOCUMENTOS DE HOTELES INDEXADOS CON OPENAI ---")
     except Exception as e:
-        logging.error(f"Error cargando documentos: {e}")
+        logging.error(f"Error indexando documentos: {e}")
 
 # ---------------- WEBHOOK VAPI ----------------
 @app.post("/vapi-webhook")
@@ -180,9 +179,8 @@ async def startup():
 
 @app.get("/")
 def health_check():
-    return {"status": "Recepción Online", "port": "8080"}
+    return {"status": "Recepción Online (OpenAI)", "port": "8080"}
 
 if __name__ == "__main__":
-    # Asegurando el puerto 8080 para Railway
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
