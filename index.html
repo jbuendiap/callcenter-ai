@@ -4,45 +4,98 @@
     <meta charset="UTF-8">
     <title>Concierge Virtual - Demo Hotel</title>
     <style>
-        body{margin:0;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif}
-        .container{text-align:center;background:rgba(255,255,255,0.03);padding:50px;border-radius:30px;border:1px solid rgba(255,255,255,0.1)}
-        .v-btn{width:100px;height:100px;border-radius:50%;background:#10b981;border:none;cursor:pointer;transition:0.3s;box-shadow:0 0 15px rgba(16,185,129,0.4)}
-        .v-btn.active{background:#f59e0b;box-shadow:0 0 20px rgba(245,158,11,0.6)}
+        body {
+            margin: 0;
+            background: #0f172a;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            font-family: sans-serif;
+        }
+        .container {
+            text-align: center;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 50px;
+            border-radius: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .v-btn {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background: #10b981;
+            border: none;
+            cursor: pointer;
+            transition: 0.3s;
+            box-shadow: 0 0 15px rgba(16, 185, 129, 0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto;
+        }
+        .v-btn.active {
+            background: #ef4444; /* Cambiado a rojo para denotar acción de colgar */
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.6);
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Asistente de Recepción</h1>
         <p>Pulsa el botón para consultar sobre servicios y reservas.</p>
-        <button id="hotel-btn" class="v-btn" onclick="startCall()">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="white"><path d="M6 6h12v12H6z"/></svg>
+        <button id="hotel-btn" class="v-btn" onclick="toggleCall()">
+            <svg id="icon" width="40" height="40" viewBox="0 0 24 24" fill="white">
+                <path id="icon-path" d="M8 5v14l11-7z"/>
+            </svg>
         </button>
     </div>
 
     <script src="https://cdn.jsdelivr.net/gh/VapiAI/html-script-tag@latest/dist/index.js"></script>
     <script>
+        // Credenciales públicas del proyecto
         const _key = "03bdeb34-cfed-4d4c-9ab9-1e59bb098cac";
         const _aid = "ab2f3c03-6ebb-4d32-b867-9f355923f722";
         
-        let vapi = null;
+        // Inicialización segura de Vapi según la carga del CDN
+        const vapi = typeof Vapi !== 'undefined' ? new Vapi(_key) : new VapiSDK(_key);
         let active = false;
 
-        function startCall() {
-            if (!vapi) vapi = new Vapi(_key);
+        const btn = document.getElementById('hotel-btn');
+        const path = document.getElementById('icon-path');
+
+        function toggleCall() {
             if (!active) {
-                vapi.start(_aid);
-                document.getElementById('hotel-btn').classList.add('active');
-                active = true;
+                // CORRECCIÓN: Estructura de objeto obligatoria para el asistente
+                vapi.start({
+                    assistantId: _aid
+                });
             } else {
                 vapi.stop();
-                resetUI();
             }
-            vapi.on('call-end', () => resetUI());
         }
 
+        // CORRECCIÓN: Los escuchadores de eventos se configuran una sola vez afuera de la función
+        vapi.on('call-start', () => {
+            active = true;
+            btn.classList.add('active');
+            path.setAttribute('d', 'M6 6h12v12H6z'); // Cambia a icono de Stop (Cuadrado)
+        });
+
+        vapi.on('call-end', () => {
+            resetUI();
+        });
+
+        vapi.on('error', (error) => {
+            console.error("Vapi Error:", error);
+            resetUI();
+        });
+
         function resetUI() {
-            document.getElementById('hotel-btn').classList.remove('active');
             active = false;
+            btn.classList.remove('active');
+            path.setAttribute('d', 'M8 5v14l11-7z'); // Regresa a icono de Play (Triángulo)
         }
     </script>
 </body>
