@@ -64,8 +64,7 @@
     <div id="s">SISTEMA EN LÍNEA</div>
   </div>
 
-  <!-- Web SDK (UMD) -->
-  <script src="https://unpkg.com/@vapi-ai/web/dist/index.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/vapi-ai/html-script-tag@latest/dist/vapi-nb.js"></script>
 
   <script>
     // --- CONFIGURACIÓN DE CREDENCIALES ---
@@ -84,6 +83,8 @@
     const status = document.getElementById("s");
 
     let isCalling = false;
+    
+    // Ahora esta inicialización no fallará porque cargamos el SDK correcto arriba
     const vapi = new Vapi(PUBLIC_KEY);
 
     function setUIConnected(connected) {
@@ -96,34 +97,4 @@
       } else {
         btn.classList.remove("active");
         path.setAttribute("d", "M8 5v14l11-7z"); // Triángulo (Play)
-        status.innerText = TXT_DISPONIBLE;
-      }
-    }
-
-    async function toggleCall() {
-      try {
-        if (!isCalling) {
-          status.innerText = TXT_CONECTANDO;
-          vapi.start(ASSISTANT_ID);
-        } else {
-          vapi.stop();
-        }
-      } catch (e) {
-        console.error("Toggle error:", e);
-        status.innerText = TXT_ERROR;
-        setUIConnected(false);
-      }
-    }
-
-    btn.addEventListener("click", toggleCall);
-
-    vapi.on("call-start", () => setUIConnected(true));
-    vapi.on("call-end", () => setUIConnected(false));
-    vapi.on("error", (e) => {
-      console.error("Vapi Error:", e);
-      status.innerText = TXT_ERROR;
-      setUIConnected(false);
-    });
-  </script>
-</body>
-</html>
+        status.
