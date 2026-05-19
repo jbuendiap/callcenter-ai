@@ -197,5 +197,5 @@ def health_check():
     return {"status": "Online", "engine": "OpenAI GPT-4o-mini"}
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
