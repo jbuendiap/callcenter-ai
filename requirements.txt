@@ -8,3 +8,5 @@ langchain-text-splitters
 faiss-cpu
 pypdf
 langdetect
+python-multipart
+pydantic
