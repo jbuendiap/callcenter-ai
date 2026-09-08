@@ -36,16 +36,34 @@ app = FastAPI()
 
 
 # ============================================================
-# CONFIGURACIÓN DE ARCHIVOS
+# UBICACIÓN DE LOS ARCHIVOS
 # ============================================================
 
-# Todos los PDF que contengan la información del hotel
-# deben encontrarse dentro de esta carpeta.
+# Directorio donde se encuentra este archivo Python
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
-DOCUMENTS_DIR = "documents"
+# Carpeta de documentos
+#
+# Estructura:
+#
+# main.py
+# documents/
+#     hotel_info.pdf
+#     manejo_objeciones.pdf
+#     etc...
+#
+DOCUMENTS_DIR = os.path.join(
+    BASE_DIR,
+    "documents"
+)
 
-# Memoria de conversaciones
-DATABASE = "hotel_memory.db"
+# Base de datos
+DATABASE = os.path.join(
+    BASE_DIR,
+    "hotel_memory.db"
+)
 
 
 # ============================================================
@@ -223,6 +241,10 @@ def search_documents(
 
     if vector_db is None:
 
+        logging.warning(
+            "El índice FAISS todavía no está disponible."
+        )
+
         return ""
 
     try:
@@ -283,7 +305,6 @@ def process_message(
 
             return "No recibí ninguna pregunta."
 
-
         message = message.strip()
 
 
@@ -334,10 +355,6 @@ def process_message(
 
         # ----------------------------------------------------
         # OPENAI
-        #
-        # La API KEY NO ESTÁ EN EL CÓDIGO.
-        #
-        # ChatOpenAI obtiene OPENAI_API_KEY desde Railway.
         # ----------------------------------------------------
 
         llm = ChatOpenAI(
@@ -348,9 +365,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # INSTRUCCIONES GENERALES
-        #
-        # No contiene información de ningún hotel.
+        # INSTRUCCIONES
         # ----------------------------------------------------
 
         system_prompt = f"""
@@ -497,6 +512,19 @@ def build_index():
 
     try:
 
+        logging.info(
+            "=================================================="
+        )
+
+        logging.info(
+            "INICIANDO CARGA DE DOCUMENTOS"
+        )
+
+        logging.info(
+            "=================================================="
+        )
+
+
         # ----------------------------------------------------
         # COMPROBAR OPENAI
         # ----------------------------------------------------
@@ -513,7 +541,22 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # CREAR CARPETA
+        # MOSTRAR UBICACIÓN DE DOCUMENTOS
+        # ----------------------------------------------------
+
+        logging.info(
+            "Directorio principal: %s",
+            BASE_DIR
+        )
+
+        logging.info(
+            "Carpeta de documentos: %s",
+            DOCUMENTS_DIR
+        )
+
+
+        # ----------------------------------------------------
+        # CREAR CARPETA SI NO EXISTE
         # ----------------------------------------------------
 
         if not os.path.exists(
@@ -525,28 +568,39 @@ def build_index():
             )
 
             logging.warning(
-                "La carpeta de documentos no existía."
+                "La carpeta documents no existía. "
+                "Fue creada automáticamente."
             )
 
-
-        # ----------------------------------------------------
-        # EMBEDDINGS
-        #
-        # La API KEY viene de Railway.
-        # ----------------------------------------------------
-
-        embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-small"
-        )
+            return
 
 
         # ----------------------------------------------------
-        # BUSCAR PDF
+        # BUSCAR ARCHIVOS
         # ----------------------------------------------------
 
         files = os.listdir(
             DOCUMENTS_DIR
         )
+
+
+        logging.info(
+            "Archivos encontrados en documents: %s",
+            len(files)
+        )
+
+
+        for file in files:
+
+            logging.info(
+                "Archivo encontrado: %s",
+                file
+            )
+
+
+        # ----------------------------------------------------
+        # FILTRAR PDF
+        # ----------------------------------------------------
 
         pdf_files = [
 
@@ -561,13 +615,65 @@ def build_index():
         ]
 
 
+        logging.info(
+            "Archivos PDF encontrados: %s",
+            len(pdf_files)
+        )
+
+
+        # ----------------------------------------------------
+        # SI NO HAY PDF
+        # ----------------------------------------------------
+
         if not pdf_files:
 
-            logging.warning(
-                "No se encontraron documentos."
+            logging.error(
+                "NO SE ENCONTRARON ARCHIVOS PDF."
+            )
+
+            logging.error(
+                "Verifica que los PDFs estén dentro de:"
+            )
+
+            logging.error(
+                "%s",
+                DOCUMENTS_DIR
             )
 
             return
+
+
+        # ----------------------------------------------------
+        # MOSTRAR PDF ENCONTRADOS
+        # ----------------------------------------------------
+
+        logging.info(
+            "Lista de documentos PDF:"
+        )
+
+        for index, file in enumerate(
+            pdf_files,
+            start=1
+        ):
+
+            logging.info(
+                "PDF %s: %s",
+                index,
+                file
+            )
+
+
+        # ----------------------------------------------------
+        # EMBEDDINGS
+        # ----------------------------------------------------
+
+        logging.info(
+            "Inicializando OpenAI Embeddings..."
+        )
+
+        embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small"
+        )
 
 
         # ----------------------------------------------------
@@ -575,6 +681,8 @@ def build_index():
         # ----------------------------------------------------
 
         all_docs = []
+
+        total_pages = 0
 
 
         for file in pdf_files:
@@ -584,11 +692,43 @@ def build_index():
                 file
             )
 
+
+            logging.info(
+                "--------------------------------------------------"
+            )
+
+            logging.info(
+                "LEYENDO PDF: %s",
+                file
+            )
+
+            logging.info(
+                "Ruta completa: %s",
+                file_path
+            )
+
+
             try:
 
-                logging.info(
-                    "Procesando documento."
-                )
+                # --------------------------------------------
+                # COMPROBAR ARCHIVO
+                # --------------------------------------------
+
+                if not os.path.isfile(
+                    file_path
+                ):
+
+                    logging.error(
+                        "El archivo no existe: %s",
+                        file_path
+                    )
+
+                    continue
+
+
+                # --------------------------------------------
+                # CARGAR PDF
+                # --------------------------------------------
 
                 loader = PyPDFLoader(
                     file_path
@@ -596,16 +736,81 @@ def build_index():
 
                 documents = loader.load()
 
+
+                # --------------------------------------------
+                # RESULTADO
+                # --------------------------------------------
+
+                pages = len(
+                    documents
+                )
+
+                total_pages += pages
+
+
+                logging.info(
+                    "OK: %s",
+                    file
+                )
+
+                logging.info(
+                    "Páginas leídas: %s",
+                    pages
+                )
+
+
+                # --------------------------------------------
+                # AGREGAR
+                # --------------------------------------------
+
                 all_docs.extend(
                     documents
                 )
 
+
             except Exception as e:
 
                 logging.error(
-                    "Error procesando documento: %s",
+                    "ERROR leyendo %s",
+                    file
+                )
+
+                logging.error(
+                    "Detalle: %s",
                     str(e)
                 )
+
+
+        # ----------------------------------------------------
+        # RESUMEN DE CARGA
+        # ----------------------------------------------------
+
+        logging.info(
+            "=================================================="
+        )
+
+        logging.info(
+            "RESUMEN DE DOCUMENTOS"
+        )
+
+        logging.info(
+            "PDF encontrados: %s",
+            len(pdf_files)
+        )
+
+        logging.info(
+            "Páginas cargadas: %s",
+            total_pages
+        )
+
+        logging.info(
+            "Documentos internos cargados: %s",
+            len(all_docs)
+        )
+
+        logging.info(
+            "=================================================="
+        )
 
 
         # ----------------------------------------------------
@@ -614,8 +819,8 @@ def build_index():
 
         if not all_docs:
 
-            logging.warning(
-                "No se pudo extraer contenido."
+            logging.error(
+                "NO SE PUDO EXTRAER CONTENIDO DE LOS PDF."
             )
 
             return
@@ -624,6 +829,11 @@ def build_index():
         # ----------------------------------------------------
         # DIVIDIR DOCUMENTOS
         # ----------------------------------------------------
+
+        logging.info(
+            "Dividiendo documentos en fragmentos..."
+        )
+
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=700,
@@ -636,9 +846,15 @@ def build_index():
         )
 
 
+        logging.info(
+            "Chunks creados: %s",
+            len(chunks)
+        )
+
+
         if not chunks:
 
-            logging.warning(
+            logging.error(
                 "No se generaron fragmentos."
             )
 
@@ -648,6 +864,11 @@ def build_index():
         # ----------------------------------------------------
         # CREAR FAISS
         # ----------------------------------------------------
+
+        logging.info(
+            "Creando índice FAISS..."
+        )
+
 
         new_vector_db = FAISS.from_documents(
             chunks,
@@ -664,15 +885,50 @@ def build_index():
             vector_db = new_vector_db
 
 
+        # ----------------------------------------------------
+        # FINAL
+        # ----------------------------------------------------
+
         logging.info(
-            "Índice documental creado correctamente."
+            "=================================================="
+        )
+
+        logging.info(
+            "ÍNDICE FAISS CREADO CORRECTAMENTE"
+        )
+
+        logging.info(
+            "PDF: %s",
+            len(pdf_files)
+        )
+
+        logging.info(
+            "Páginas: %s",
+            total_pages
+        )
+
+        logging.info(
+            "Chunks: %s",
+            len(chunks)
+        )
+
+        logging.info(
+            "RAG LISTO PARA RECIBIR CONSULTAS"
+        )
+
+        logging.info(
+            "=================================================="
         )
 
 
     except Exception as e:
 
         logging.error(
-            "Error construyendo índice: %s",
+            "ERROR CONSTRUYENDO ÍNDICE"
+        )
+
+        logging.error(
+            "Detalle: %s",
             str(e)
         )
 
@@ -898,6 +1154,79 @@ async def vapi_webhook(
 
 
 # ============================================================
+# ESTADO DE LOS DOCUMENTOS
+# ============================================================
+
+@app.get("/status-documents")
+def status_documents():
+
+    global vector_db
+
+    try:
+
+        if not os.path.exists(
+            DOCUMENTS_DIR
+        ):
+
+            return {
+                "status": "error",
+                "documents_folder": DOCUMENTS_DIR,
+                "folder_exists": False,
+                "pdfs": [],
+                "total_pdfs": 0,
+                "index_ready": vector_db is not None
+            }
+
+
+        files = os.listdir(
+            DOCUMENTS_DIR
+        )
+
+
+        pdf_files = [
+
+            file
+
+            for file in files
+
+            if file.lower().endswith(
+                ".pdf"
+            )
+
+        ]
+
+
+        return {
+
+            "status": "ok",
+
+            "documents_folder": DOCUMENTS_DIR,
+
+            "folder_exists": True,
+
+            "pdfs": pdf_files,
+
+            "total_pdfs": len(
+                pdf_files
+            ),
+
+            "index_ready": vector_db is not None
+
+        }
+
+
+    except Exception as e:
+
+        return {
+
+            "status": "error",
+
+            "error": str(e)
+
+        }
+
+
+# ============================================================
 # STARTUP
 # ============================================================
 
@@ -907,7 +1236,15 @@ async def vapi_webhook(
 async def startup():
 
     logging.info(
-        "Servicio iniciado."
+        "=================================================="
+    )
+
+    logging.info(
+        "SERVICIO INICIANDO"
+    )
+
+    logging.info(
+        "=================================================="
     )
 
 
@@ -927,14 +1264,29 @@ async def startup():
     ):
 
         logging.info(
-            "Configuración de entorno detectada."
+            "OPENAI_API_KEY detectada."
         )
 
     else:
 
         logging.error(
-            "Falta la configuración requerida."
+            "FALTA OPENAI_API_KEY."
         )
+
+
+    # --------------------------------------------------------
+    # MOSTRAR UBICACIÓN
+    # --------------------------------------------------------
+
+    logging.info(
+        "BASE_DIR: %s",
+        BASE_DIR
+    )
+
+    logging.info(
+        "DOCUMENTS_DIR: %s",
+        DOCUMENTS_DIR
+    )
 
 
     # --------------------------------------------------------
@@ -955,7 +1307,13 @@ async def startup():
 def health_check():
 
     return {
-        "status": "ok"
+
+        "status": "ok",
+
+        "documents_folder": DOCUMENTS_DIR,
+
+        "index_ready": vector_db is not None
+
     }
 
 
