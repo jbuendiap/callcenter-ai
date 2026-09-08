@@ -1,3 +1,4 @@
+```python
 import os
 import uvicorn
 import sqlite3
@@ -6,6 +7,8 @@ import threading
 import json
 
 from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -32,37 +35,62 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-app = FastAPI()
+app = FastAPI(
+    title="Hotel AI Assistant",
+    version="1.0.0"
+)
 
 
 # ============================================================
-# UBICACIÓN DE LOS ARCHIVOS
+# UBICACIONES
 # ============================================================
 
-# Directorio donde se encuentra este archivo Python
 BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
 
-# Carpeta de documentos
-#
-# Estructura:
-#
-# main.py
-# documents/
-#     hotel_info.pdf
-#     manejo_objeciones.pdf
-#     etc...
-#
 DOCUMENTS_DIR = os.path.join(
     BASE_DIR,
     "documents"
 )
 
-# Base de datos
+STATIC_DIR = os.path.join(
+    BASE_DIR,
+    "static"
+)
+
 DATABASE = os.path.join(
     BASE_DIR,
     "hotel_memory.db"
+)
+
+
+# ============================================================
+# VAPI
+# ============================================================
+
+# IMPORTANTE:
+#
+# VAPI_PUBLIC_KEY:
+# Esta clave SÍ puede ser enviada al navegador.
+#
+# VAPI_ASSISTANT_ID:
+# ID del asistente que utilizará la página.
+#
+# VAPI_PRIVATE_KEY:
+# NO se envía al navegador.
+# Si posteriormente necesitas utilizarla en el backend,
+# permanece solamente como variable de entorno.
+#
+
+VAPI_PUBLIC_KEY = os.getenv(
+    "VAPI_PUBLIC_KEY",
+    ""
+)
+
+VAPI_ASSISTANT_ID = os.getenv(
+    "VAPI_ASSISTANT_ID",
+    ""
 )
 
 
@@ -73,6 +101,61 @@ DATABASE = os.path.join(
 vector_db = None
 
 index_lock = threading.Lock()
+
+
+# ============================================================
+# ARCHIVOS ESTÁTICOS
+# ============================================================
+
+if os.path.exists(STATIC_DIR):
+
+    app.mount(
+        "/static",
+        StaticFiles(
+            directory=STATIC_DIR
+        ),
+        name="static"
+    )
+
+
+# ============================================================
+# PÁGINA PRINCIPAL
+# ============================================================
+
+@app.get("/")
+def home():
+
+    index_file = os.path.join(
+        STATIC_DIR,
+        "index.html"
+    )
+
+    if not os.path.exists(index_file):
+
+        return {
+            "status": "error",
+            "message": "No se encontró static/index.html"
+        }
+
+    return FileResponse(
+        index_file
+    )
+
+
+# ============================================================
+# CONFIGURACIÓN PÚBLICA PARA FRONTEND
+# ============================================================
+
+@app.get("/config")
+def frontend_config():
+
+    return {
+
+        "vapi_public_key": VAPI_PUBLIC_KEY,
+
+        "vapi_assistant_id": VAPI_ASSISTANT_ID
+
+    }
 
 
 # ============================================================
@@ -229,7 +312,7 @@ def detect_language(
 
 
 # ============================================================
-# BÚSQUEDA EN LOS DOCUMENTOS
+# BÚSQUEDA EN DOCUMENTOS
 # ============================================================
 
 def search_documents(
@@ -297,10 +380,6 @@ def process_message(
 
     try:
 
-        # ----------------------------------------------------
-        # VALIDACIÓN
-        # ----------------------------------------------------
-
         if not message or not message.strip():
 
             return "No recibí ninguna pregunta."
@@ -309,7 +388,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # DETECTAR IDIOMA
+        # IDIOMA
         # ----------------------------------------------------
 
         language = detect_language(
@@ -318,7 +397,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # BUSCAR INFORMACIÓN EN LOS PDF
+        # BUSCAR PDF
         # ----------------------------------------------------
 
         contexto = search_documents(
@@ -328,7 +407,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # SI NO EXISTE INFORMACIÓN
+        # SIN INFORMACIÓN
         # ----------------------------------------------------
 
         if not contexto:
@@ -365,7 +444,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # INSTRUCCIONES
+        # SYSTEM PROMPT
         # ----------------------------------------------------
 
         system_prompt = f"""
@@ -403,8 +482,7 @@ REGLAS:
     embeddings, modelos, programación o herramientas.
 
 11. El historial sirve únicamente para mantener el contexto
-    de la conversación. No lo utilices como fuente de datos
-    sobre el hotel.
+    de la conversación.
 
 12. Si existe una contradicción entre el historial y los
     documentos, utiliza la información de los documentos.
@@ -436,10 +514,6 @@ CONTEXTO DOCUMENTAL:
         )
 
 
-        # ----------------------------------------------------
-        # MENSAJES
-        # ----------------------------------------------------
-
         messages = [
 
             SystemMessage(
@@ -470,7 +544,7 @@ CONTEXTO DOCUMENTAL:
 
 
         # ----------------------------------------------------
-        # GUARDAR CONVERSACIÓN
+        # GUARDAR
         # ----------------------------------------------------
 
         save_message(
@@ -503,7 +577,7 @@ CONTEXTO DOCUMENTAL:
 
 
 # ============================================================
-# CONSTRUIR ÍNDICE DE DOCUMENTOS
+# CONSTRUIR ÍNDICE FAISS
 # ============================================================
 
 def build_index():
@@ -526,7 +600,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # COMPROBAR OPENAI
+        # OPENAI
         # ----------------------------------------------------
 
         if not os.getenv(
@@ -540,10 +614,6 @@ def build_index():
             return
 
 
-        # ----------------------------------------------------
-        # MOSTRAR UBICACIÓN DE DOCUMENTOS
-        # ----------------------------------------------------
-
         logging.info(
             "Directorio principal: %s",
             BASE_DIR
@@ -556,7 +626,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # CREAR CARPETA SI NO EXISTE
+        # CREAR CARPETA
         # ----------------------------------------------------
 
         if not os.path.exists(
@@ -568,15 +638,14 @@ def build_index():
             )
 
             logging.warning(
-                "La carpeta documents no existía. "
-                "Fue creada automáticamente."
+                "La carpeta documents no existía."
             )
 
             return
 
 
         # ----------------------------------------------------
-        # BUSCAR ARCHIVOS
+        # ARCHIVOS
         # ----------------------------------------------------
 
         files = os.listdir(
@@ -585,7 +654,7 @@ def build_index():
 
 
         logging.info(
-            "Archivos encontrados en documents: %s",
+            "Archivos encontrados: %s",
             len(files)
         )
 
@@ -599,7 +668,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # FILTRAR PDF
+        # PDF
         # ----------------------------------------------------
 
         pdf_files = [
@@ -621,10 +690,6 @@ def build_index():
         )
 
 
-        # ----------------------------------------------------
-        # SI NO HAY PDF
-        # ----------------------------------------------------
-
         if not pdf_files:
 
             logging.error(
@@ -632,11 +697,7 @@ def build_index():
             )
 
             logging.error(
-                "Verifica que los PDFs estén dentro de:"
-            )
-
-            logging.error(
-                "%s",
+                "Coloca los PDFs dentro de: %s",
                 DOCUMENTS_DIR
             )
 
@@ -644,7 +705,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # MOSTRAR PDF ENCONTRADOS
+        # MOSTRAR PDF
         # ----------------------------------------------------
 
         logging.info(
@@ -710,10 +771,6 @@ def build_index():
 
             try:
 
-                # --------------------------------------------
-                # COMPROBAR ARCHIVO
-                # --------------------------------------------
-
                 if not os.path.isfile(
                     file_path
                 ):
@@ -726,20 +783,12 @@ def build_index():
                     continue
 
 
-                # --------------------------------------------
-                # CARGAR PDF
-                # --------------------------------------------
-
                 loader = PyPDFLoader(
                     file_path
                 )
 
                 documents = loader.load()
 
-
-                # --------------------------------------------
-                # RESULTADO
-                # --------------------------------------------
 
                 pages = len(
                     documents
@@ -758,10 +807,6 @@ def build_index():
                     pages
                 )
 
-
-                # --------------------------------------------
-                # AGREGAR
-                # --------------------------------------------
 
                 all_docs.extend(
                     documents
@@ -782,7 +827,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # RESUMEN DE CARGA
+        # RESUMEN
         # ----------------------------------------------------
 
         logging.info(
@@ -813,10 +858,6 @@ def build_index():
         )
 
 
-        # ----------------------------------------------------
-        # COMPROBAR CONTENIDO
-        # ----------------------------------------------------
-
         if not all_docs:
 
             logging.error(
@@ -827,13 +868,12 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # DIVIDIR DOCUMENTOS
+        # CHUNKS
         # ----------------------------------------------------
 
         logging.info(
-            "Dividiendo documentos en fragmentos..."
+            "Dividiendo documentos..."
         )
-
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=700,
@@ -862,7 +902,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # CREAR FAISS
+        # FAISS
         # ----------------------------------------------------
 
         logging.info(
@@ -877,7 +917,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # ACTUALIZAR ÍNDICE
+        # ACTUALIZAR
         # ----------------------------------------------------
 
         with index_lock:
@@ -913,7 +953,7 @@ def build_index():
         )
 
         logging.info(
-            "RAG LISTO PARA RECIBIR CONSULTAS"
+            "RAG LISTO"
         )
 
         logging.info(
@@ -947,10 +987,6 @@ async def vapi_webhook(
         data = await request.json()
 
 
-        # ----------------------------------------------------
-        # DATOS DEL MENSAJE
-        # ----------------------------------------------------
-
         message_data = data.get(
             "message",
             {}
@@ -983,10 +1019,6 @@ async def vapi_webhook(
                 "ok": True
             }
 
-
-        # ----------------------------------------------------
-        # TOOL CALL
-        # ----------------------------------------------------
 
         tool_call = tool_calls[0]
 
@@ -1056,7 +1088,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # PREGUNTA
+        # QUERY
         # ----------------------------------------------------
 
         query = arguments.get(
@@ -1079,7 +1111,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # IDENTIFICADOR DE USUARIO
+        # USUARIO
         # ----------------------------------------------------
 
         customer_info = message_data.get(
@@ -1109,7 +1141,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # PROCESAR CONSULTA
+        # PROCESAR
         # ----------------------------------------------------
 
         respuesta = process_message(
@@ -1119,7 +1151,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # RESPUESTA PARA VAPI
+        # RESPUESTA
         # ----------------------------------------------------
 
         return {
@@ -1149,12 +1181,15 @@ async def vapi_webhook(
         )
 
         return {
-            "error": "Error procesando la solicitud."
+
+            "error":
+                "Error procesando la solicitud."
+
         }
 
 
 # ============================================================
-# ESTADO DE LOS DOCUMENTOS
+# ESTADO DE DOCUMENTOS
 # ============================================================
 
 @app.get("/status-documents")
@@ -1169,12 +1204,21 @@ def status_documents():
         ):
 
             return {
+
                 "status": "error",
-                "documents_folder": DOCUMENTS_DIR,
+
+                "documents_folder":
+                    DOCUMENTS_DIR,
+
                 "folder_exists": False,
+
                 "pdfs": [],
+
                 "total_pdfs": 0,
-                "index_ready": vector_db is not None
+
+                "index_ready":
+                    vector_db is not None
+
             }
 
 
@@ -1200,17 +1244,19 @@ def status_documents():
 
             "status": "ok",
 
-            "documents_folder": DOCUMENTS_DIR,
+            "documents_folder":
+                DOCUMENTS_DIR,
 
             "folder_exists": True,
 
-            "pdfs": pdf_files,
+            "pdfs":
+                pdf_files,
 
-            "total_pdfs": len(
-                pdf_files
-            ),
+            "total_pdfs":
+                len(pdf_files),
 
-            "index_ready": vector_db is not None
+            "index_ready":
+                vector_db is not None
 
         }
 
@@ -1249,14 +1295,14 @@ async def startup():
 
 
     # --------------------------------------------------------
-    # BASE DE DATOS
+    # DATABASE
     # --------------------------------------------------------
 
     init_db()
 
 
     # --------------------------------------------------------
-    # VERIFICAR OPENAI
+    # OPENAI
     # --------------------------------------------------------
 
     if os.getenv(
@@ -1275,7 +1321,37 @@ async def startup():
 
 
     # --------------------------------------------------------
-    # MOSTRAR UBICACIÓN
+    # VAPI
+    # --------------------------------------------------------
+
+    if VAPI_PUBLIC_KEY:
+
+        logging.info(
+            "VAPI_PUBLIC_KEY detectada."
+        )
+
+    else:
+
+        logging.warning(
+            "VAPI_PUBLIC_KEY no configurada."
+        )
+
+
+    if VAPI_ASSISTANT_ID:
+
+        logging.info(
+            "VAPI_ASSISTANT_ID detectado."
+        )
+
+    else:
+
+        logging.warning(
+            "VAPI_ASSISTANT_ID no configurado."
+        )
+
+
+    # --------------------------------------------------------
+    # UBICACIONES
     # --------------------------------------------------------
 
     logging.info(
@@ -1288,9 +1364,14 @@ async def startup():
         DOCUMENTS_DIR
     )
 
+    logging.info(
+        "STATIC_DIR: %s",
+        STATIC_DIR
+    )
+
 
     # --------------------------------------------------------
-    # CONSTRUIR ÍNDICE
+    # ÍNDICE
     # --------------------------------------------------------
 
     threading.Thread(
@@ -1303,16 +1384,25 @@ async def startup():
 # HEALTH CHECK
 # ============================================================
 
-@app.get("/")
+@app.get("/health")
 def health_check():
 
     return {
 
         "status": "ok",
 
-        "documents_folder": DOCUMENTS_DIR,
+        "documents_folder":
+            DOCUMENTS_DIR,
 
-        "index_ready": vector_db is not None
+        "index_ready":
+            vector_db is not None,
+
+        "vapi_configured":
+            bool(
+                VAPI_PUBLIC_KEY
+                and
+                VAPI_ASSISTANT_ID
+            )
 
     }
 
@@ -1335,3 +1425,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
+```
