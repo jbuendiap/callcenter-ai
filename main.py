@@ -6,8 +6,7 @@ import threading
 import json
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -24,7 +23,7 @@ from langdetect import detect, DetectorFactory
 
 
 # ============================================================
-# CONFIGURACIÓN GENERAL
+# CONFIGURACIÓN DE LOGS
 # ============================================================
 
 DetectorFactory.seed = 0
@@ -34,9 +33,34 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
+
+# ============================================================
+# APLICACIÓN FASTAPI
+# ============================================================
+
 app = FastAPI(
     title="Hotel AI Assistant",
     version="1.0.0"
+)
+
+
+# ============================================================
+# CORS
+# ============================================================
+#
+# Por ahora permitimos solicitudes desde cualquier origen.
+#
+# Cuando tengas el dominio definitivo de Cloudflare,
+# podemos reemplazar "*" por el dominio exacto.
+#
+# ============================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -48,15 +72,12 @@ BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
 
+
 DOCUMENTS_DIR = os.path.join(
     BASE_DIR,
     "documents"
 )
 
-STATIC_DIR = os.path.join(
-    BASE_DIR,
-    "static"
-)
 
 DATABASE = os.path.join(
     BASE_DIR,
@@ -65,7 +86,7 @@ DATABASE = os.path.join(
 
 
 # ============================================================
-# ESTADO GLOBAL
+# VARIABLES GLOBALES
 # ============================================================
 
 vector_db = None
@@ -74,42 +95,18 @@ index_lock = threading.Lock()
 
 
 # ============================================================
-# ARCHIVOS ESTÁTICOS
-# ============================================================
-
-if os.path.exists(STATIC_DIR):
-
-    app.mount(
-        "/static",
-        StaticFiles(
-            directory=STATIC_DIR
-        ),
-        name="static"
-    )
-
-
-# ============================================================
-# PÁGINA PRINCIPAL
+# HEALTH
 # ============================================================
 
 @app.get("/")
 def home():
 
-    index_file = os.path.join(
-        STATIC_DIR,
-        "index.html"
-    )
-
-    if not os.path.exists(index_file):
-
-        return {
-            "status": "error",
-            "message": "No se encontró static/index.html"
-        }
-
-    return FileResponse(
-        index_file
-    )
+    return {
+        "status": "ok",
+        "service": "Hotel AI Assistant",
+        "backend": "Railway",
+        "message": "Backend funcionando correctamente."
+    }
 
 
 # ============================================================
@@ -268,7 +265,7 @@ def get_history(
 
 
 # ============================================================
-# DETECCIÓN DE IDIOMA
+# DETECTAR IDIOMA
 # ============================================================
 
 def detect_language(
@@ -294,7 +291,7 @@ def detect_language(
     except Exception as e:
 
         logging.warning(
-            "No se pudo detectar idioma: %s",
+            "No se pudo detectar el idioma: %s",
             str(e)
         )
 
@@ -302,7 +299,7 @@ def detect_language(
 
 
 # ============================================================
-# BÚSQUEDA EN DOCUMENTOS
+# BUSCAR INFORMACIÓN EN LOS PDF
 # ============================================================
 
 def search_documents(
@@ -339,42 +336,62 @@ def search_documents(
 
             content = document.page_content.strip()
 
-            if content:
+            if not content:
+                continue
 
-                source = document.metadata.get(
-                    "source",
-                    ""
+            source = document.metadata.get(
+                "source",
+                ""
+            )
+
+            document_name = document.metadata.get(
+                "document_name",
+                ""
+            )
+
+            page = document.metadata.get(
+                "page",
+                None
+            )
+
+            if document_name:
+
+                source_name = document_name
+
+            elif source:
+
+                source_name = os.path.basename(
+                    source
                 )
 
-                page = document.metadata.get(
-                    "page",
-                    ""
+            else:
+
+                source_name = "Documento"
+
+            if page is not None:
+
+                try:
+
+                    page_number = int(page) + 1
+
+                except Exception:
+
+                    page_number = page
+
+                header = (
+                    f"[Documento: {source_name} | "
+                    f"Página: {page_number}]"
                 )
 
-                if source:
+            else:
 
-                    filename = os.path.basename(
-                        source
-                    )
-
-                    if page != "":
-
-                        content = (
-                            f"[Documento: {filename} | "
-                            f"Página: {page + 1}]\n"
-                            f"{content}"
-                        )
-
-                    else:
-
-                        content = (
-                            f"[Documento: {filename}]\n"
-                            f"{content}"
-                        )
-
-                context_parts.append(
-                    content
+                header = (
+                    f"[Documento: {source_name}]"
                 )
+
+            context_parts.append(
+                f"{header}\n{content}"
+            )
 
         return "\n\n".join(
             context_parts
@@ -391,7 +408,7 @@ def search_documents(
 
 
 # ============================================================
-# PROCESAMIENTO DEL MENSAJE
+# PROCESAR MENSAJE
 # ============================================================
 
 def process_message(
@@ -409,7 +426,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # IDIOMA
+        # DETECTAR IDIOMA
         # ----------------------------------------------------
 
         language = detect_language(
@@ -417,8 +434,14 @@ def process_message(
         )
 
 
+        logging.info(
+            "Idioma detectado: %s",
+            language
+        )
+
+
         # ----------------------------------------------------
-        # BUSCAR EN PDF
+        # BUSCAR EN LOS DOCUMENTOS
         # ----------------------------------------------------
 
         contexto = search_documents(
@@ -428,7 +451,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # SIN INFORMACIÓN
+        # SI NO EXISTE CONTEXTO
         # ----------------------------------------------------
 
         if not contexto:
@@ -454,7 +477,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # OPENAI
+        # CREAR MODELO
         # ----------------------------------------------------
 
         llm = ChatOpenAI(
@@ -465,7 +488,7 @@ def process_message(
 
 
         # ----------------------------------------------------
-        # PROMPT
+        # SYSTEM PROMPT
         # ----------------------------------------------------
 
         system_prompt = f"""
@@ -517,6 +540,12 @@ REGLAS:
 
 16. No inventes políticas.
 
+17. Si el usuario hace una pregunta que requiere información
+    que no aparece en los documentos, dilo claramente.
+
+18. No utilices conocimiento externo para completar
+    información que no aparezca en los documentos.
+
 IDIOMA DEL USUARIO:
 {language}
 
@@ -535,6 +564,10 @@ CONTEXTO DOCUMENTAL:
         )
 
 
+        # ----------------------------------------------------
+        # MENSAJES PARA OPENAI
+        # ----------------------------------------------------
+
         messages = [
 
             SystemMessage(
@@ -551,7 +584,7 @@ CONTEXTO DOCUMENTAL:
 
 
         # ----------------------------------------------------
-        # RESPUESTA
+        # GENERAR RESPUESTA
         # ----------------------------------------------------
 
         response = llm.invoke(
@@ -598,7 +631,7 @@ CONTEXTO DOCUMENTAL:
 
 
 # ============================================================
-# CONSTRUCCIÓN DEL ÍNDICE FAISS
+# CONSTRUIR ÍNDICE FAISS
 # ============================================================
 
 def build_index():
@@ -621,7 +654,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # VERIFICAR OPENAI
+        # OPENAI
         # ----------------------------------------------------
 
         if not os.getenv(
@@ -636,7 +669,7 @@ def build_index():
 
 
         logging.info(
-            "OPENAI_API_KEY detectada en el entorno de Railway."
+            "OPENAI_API_KEY detectada en Railway."
         )
 
 
@@ -656,7 +689,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # CREAR CARPETA DOCUMENTS
+        # VERIFICAR CARPETA DOCUMENTS
         # ----------------------------------------------------
 
         if not os.path.exists(
@@ -668,8 +701,16 @@ def build_index():
             )
 
             logging.warning(
-                "La carpeta documents no existía. "
+                "La carpeta documents no existía."
+            )
+
+            logging.warning(
                 "Fue creada automáticamente."
+            )
+
+            logging.warning(
+                "Debes colocar los PDF dentro de: %s",
+                DOCUMENTS_DIR
             )
 
             return
@@ -697,7 +738,7 @@ def build_index():
             )
 
             logging.error(
-                "Debes colocar los archivos PDF dentro de: %s",
+                "Debes colocar los PDF dentro de: %s",
                 DOCUMENTS_DIR
             )
 
@@ -708,7 +749,7 @@ def build_index():
         # MOSTRAR ARCHIVOS
         # ----------------------------------------------------
 
-        for file in files:
+        for file in sorted(files):
 
             full_path = os.path.join(
                 DOCUMENTS_DIR,
@@ -733,7 +774,7 @@ def build_index():
 
             file
 
-            for file in files
+            for file in sorted(files)
 
             if file.lower().endswith(
                 ".pdf"
@@ -748,6 +789,10 @@ def build_index():
         )
 
 
+        # ----------------------------------------------------
+        # SIN PDF
+        # ----------------------------------------------------
+
         if not pdf_files:
 
             logging.error(
@@ -759,11 +804,7 @@ def build_index():
             )
 
             logging.error(
-                "Coloca los PDFs dentro de:"
-            )
-
-            logging.error(
-                "%s",
+                "Ruta buscada: %s",
                 DOCUMENTS_DIR
             )
 
@@ -775,7 +816,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # MOSTRAR LISTA DE PDF
+        # LISTA DE PDF
         # ----------------------------------------------------
 
         logging.info(
@@ -784,7 +825,7 @@ def build_index():
 
 
         for index, file in enumerate(
-            sorted(pdf_files),
+            pdf_files,
             start=1
         ):
 
@@ -803,13 +844,14 @@ def build_index():
             "Inicializando OpenAI Embeddings..."
         )
 
+
         embeddings = OpenAIEmbeddings(
             model="text-embedding-3-small"
         )
 
 
         # ----------------------------------------------------
-        # DOCUMENTOS
+        # VARIABLES
         # ----------------------------------------------------
 
         all_docs = []
@@ -825,9 +867,7 @@ def build_index():
         # LEER CADA PDF
         # ----------------------------------------------------
 
-        for file in sorted(
-            pdf_files
-        ):
+        for file in pdf_files:
 
             file_path = os.path.join(
                 DOCUMENTS_DIR,
@@ -870,6 +910,7 @@ def build_index():
                     file_path
                 )
 
+
                 documents = loader.load()
 
 
@@ -890,18 +931,18 @@ def build_index():
                     continue
 
 
-                # --------------------------------------------
-                # METADATA DEL PDF
-                # --------------------------------------------
+                # ------------------------------------------------
+                # AGREGAR METADATA
+                # ------------------------------------------------
 
                 for document in documents:
 
                     document.metadata[
-                        "source_file"
+                        "document_name"
                     ] = file
 
                     document.metadata[
-                        "document_name"
+                        "source_file"
                     ] = file
 
 
@@ -915,12 +956,16 @@ def build_index():
 
 
                 logging.info(
-                    "OK: %s",
+                    "PDF CARGADO CORRECTAMENTE"
+                )
+
+                logging.info(
+                    "Nombre: %s",
                     file
                 )
 
                 logging.info(
-                    "Páginas leídas: %s",
+                    "Páginas: %s",
                     pages
                 )
 
@@ -930,7 +975,7 @@ def build_index():
                 failed_pdfs += 1
 
                 logging.error(
-                    "ERROR leyendo PDF: %s",
+                    "ERROR LEYENDO PDF: %s",
                     file
                 )
 
@@ -983,7 +1028,7 @@ def build_index():
 
 
         # ----------------------------------------------------
-        # VALIDAR DOCUMENTOS
+        # VALIDAR CONTENIDO
         # ----------------------------------------------------
 
         if not all_docs:
@@ -1000,7 +1045,7 @@ def build_index():
         # ----------------------------------------------------
 
         logging.info(
-            "Dividiendo documentos en fragmentos..."
+            "Dividiendo documentos..."
         )
 
 
@@ -1072,7 +1117,7 @@ def build_index():
         )
 
         logging.info(
-            "Páginas: %s",
+            "Páginas procesadas: %s",
             total_pages
         )
 
@@ -1125,9 +1170,13 @@ async def vapi_webhook(
 
 
         logging.info(
-            "Webhook recibido desde Vapi."
+            "Webhook recibido."
         )
 
+
+        # ----------------------------------------------------
+        # MESSAGE
+        # ----------------------------------------------------
 
         message_data = data.get(
             "message",
@@ -1180,7 +1229,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # FUNCIÓN
+        # FUNCTION
         # ----------------------------------------------------
 
         function_data = tool_call.get(
@@ -1204,7 +1253,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # ARGUMENTOS JSON
+        # ARGUMENTOS
         # ----------------------------------------------------
 
         if isinstance(
@@ -1262,6 +1311,10 @@ async def vapi_webhook(
         )
 
 
+        # ----------------------------------------------------
+        # SI NO HAY QUERY
+        # ----------------------------------------------------
+
         if not query:
 
             return {
@@ -1284,7 +1337,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # IDENTIFICAR USUARIO
+        # CUSTOMER
         # ----------------------------------------------------
 
         customer_info = message_data.get(
@@ -1326,7 +1379,7 @@ async def vapi_webhook(
 
 
         # ----------------------------------------------------
-        # PROCESAR
+        # PROCESAR CONSULTA
         # ----------------------------------------------------
 
         respuesta = process_message(
@@ -1466,138 +1519,6 @@ def status_documents():
 
 
 # ============================================================
-# STARTUP
-# ============================================================
-
-@app.on_event(
-    "startup"
-)
-async def startup():
-
-    logging.info(
-        "=================================================="
-    )
-
-    logging.info(
-        "SERVICIO INICIANDO"
-    )
-
-    logging.info(
-        "=================================================="
-    )
-
-
-    # --------------------------------------------------------
-    # DATABASE
-    # --------------------------------------------------------
-
-    init_db()
-
-
-    # --------------------------------------------------------
-    # OPENAI
-    # --------------------------------------------------------
-
-    if os.getenv(
-        "OPENAI_API_KEY"
-    ):
-
-        logging.info(
-            "OPENAI_API_KEY detectada en Railway."
-        )
-
-    else:
-
-        logging.error(
-            "FALTA OPENAI_API_KEY en Railway."
-        )
-
-
-    # --------------------------------------------------------
-    # VAPI
-    # --------------------------------------------------------
-    #
-    # IMPORTANTE:
-    #
-    # No enviamos ninguna API key al frontend.
-    #
-    # Tampoco existe:
-    #
-    # VAPI_PUBLIC_KEY = ...
-    #
-    # VAPI_ASSISTANT_ID = ...
-    #
-    # Las credenciales de Vapi deben permanecer
-    # exclusivamente en Railway.
-    #
-    # --------------------------------------------------------
-
-    if os.getenv(
-        "VAPI_PRIVATE_KEY"
-    ):
-
-        logging.info(
-            "Credencial privada de Vapi detectada en Railway."
-        )
-
-    else:
-
-        logging.warning(
-            "VAPI_PRIVATE_KEY no está configurada."
-        )
-
-
-    if os.getenv(
-        "VAPI_ASSISTANT_ID"
-    ):
-
-        logging.info(
-            "VAPI_ASSISTANT_ID detectado en Railway."
-        )
-
-    else:
-
-        logging.warning(
-            "VAPI_ASSISTANT_ID no está configurado."
-        )
-
-
-    # --------------------------------------------------------
-    # RUTAS
-    # --------------------------------------------------------
-
-    logging.info(
-        "BASE_DIR: %s",
-        BASE_DIR
-    )
-
-    logging.info(
-        "DOCUMENTS_DIR: %s",
-        DOCUMENTS_DIR
-    )
-
-    logging.info(
-        "STATIC_DIR: %s",
-        STATIC_DIR
-    )
-
-    logging.info(
-        "DATABASE: %s",
-        DATABASE
-    )
-
-
-    # --------------------------------------------------------
-    # CONSTRUIR FAISS
-    # --------------------------------------------------------
-
-    threading.Thread(
-        target=build_index,
-        daemon=True
-    ).start()
-
-
-# ============================================================
 # HEALTH CHECK
 # ============================================================
 
@@ -1610,6 +1531,9 @@ def health_check():
 
         "status":
             "ok",
+
+        "backend":
+            "Railway",
 
         "documents_folder":
             DOCUMENTS_DIR,
@@ -1642,6 +1566,126 @@ def health_check():
 
 
 # ============================================================
+# STARTUP
+# ============================================================
+
+@app.on_event(
+    "startup"
+)
+async def startup():
+
+    logging.info(
+        "=================================================="
+    )
+
+    logging.info(
+        "SERVICIO INICIANDO"
+    )
+
+    logging.info(
+        "BACKEND: RAILWAY"
+    )
+
+    logging.info(
+        "=================================================="
+    )
+
+
+    # --------------------------------------------------------
+    # BASE DE DATOS
+    # --------------------------------------------------------
+
+    init_db()
+
+
+    # --------------------------------------------------------
+    # OPENAI
+    # --------------------------------------------------------
+
+    if os.getenv(
+        "OPENAI_API_KEY"
+    ):
+
+        logging.info(
+            "OPENAI_API_KEY detectada en Railway."
+        )
+
+    else:
+
+        logging.error(
+            "FALTA OPENAI_API_KEY EN RAILWAY."
+        )
+
+
+    # --------------------------------------------------------
+    # VAPI PRIVATE KEY
+    # --------------------------------------------------------
+
+    if os.getenv(
+        "VAPI_PRIVATE_KEY"
+    ):
+
+        logging.info(
+            "VAPI_PRIVATE_KEY detectada en Railway."
+        )
+
+    else:
+
+        logging.warning(
+            "VAPI_PRIVATE_KEY no está configurada."
+        )
+
+
+    # --------------------------------------------------------
+    # VAPI ASSISTANT ID
+    # --------------------------------------------------------
+
+    if os.getenv(
+        "VAPI_ASSISTANT_ID"
+    ):
+
+        logging.info(
+            "VAPI_ASSISTANT_ID detectado en Railway."
+        )
+
+    else:
+
+        logging.warning(
+            "VAPI_ASSISTANT_ID no está configurado."
+        )
+
+
+    # --------------------------------------------------------
+    # RUTAS
+    # --------------------------------------------------------
+
+    logging.info(
+        "BASE_DIR: %s",
+        BASE_DIR
+    )
+
+    logging.info(
+        "DOCUMENTS_DIR: %s",
+        DOCUMENTS_DIR
+    )
+
+    logging.info(
+        "DATABASE: %s",
+        DATABASE
+    )
+
+
+    # --------------------------------------------------------
+    # CONSTRUIR ÍNDICE EN SEGUNDO PLANO
+    # --------------------------------------------------------
+
+    threading.Thread(
+        target=build_index,
+        daemon=True
+    ).start()
+
+
+# ============================================================
 # EJECUCIÓN
 # ============================================================
 
@@ -1653,6 +1697,7 @@ if __name__ == "__main__":
             8000
         )
     )
+
 
     uvicorn.run(
         app,
