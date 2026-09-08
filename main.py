@@ -22,6 +22,11 @@ from langchain_core.messages import (
 
 from langdetect import detect, DetectorFactory
 
+
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
+
 DetectorFactory.seed = 0
 
 logging.basicConfig(
@@ -34,6 +39,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+# ============================================================
+# RUTAS DEL PROYECTO
+# ============================================================
 
 BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
@@ -55,21 +64,18 @@ DATABASE = os.path.join(
 )
 
 
-VAPI_PUBLIC_KEY = os.getenv(
-    "VAPI_PUBLIC_KEY",
-    ""
-)
-
-VAPI_ASSISTANT_ID = os.getenv(
-    "VAPI_ASSISTANT_ID",
-    ""
-)
-
+# ============================================================
+# ESTADO GLOBAL
+# ============================================================
 
 vector_db = None
 
 index_lock = threading.Lock()
 
+
+# ============================================================
+# ARCHIVOS ESTÁTICOS
+# ============================================================
 
 if os.path.exists(STATIC_DIR):
 
@@ -81,6 +87,10 @@ if os.path.exists(STATIC_DIR):
         name="static"
     )
 
+
+# ============================================================
+# PÁGINA PRINCIPAL
+# ============================================================
 
 @app.get("/")
 def home():
@@ -102,42 +112,51 @@ def home():
     )
 
 
-@app.get("/config")
-def frontend_config():
-
-    return {
-
-        "vapi_public_key": VAPI_PUBLIC_KEY,
-
-        "vapi_assistant_id": VAPI_ASSISTANT_ID
-
-    }
-
+# ============================================================
+# BASE DE DATOS
+# ============================================================
 
 def init_db():
 
-    conn = sqlite3.connect(
-        DATABASE,
-        check_same_thread=False
-    )
+    try:
 
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            message TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        conn = sqlite3.connect(
+            DATABASE,
+            check_same_thread=False
         )
-        """
-    )
 
-    conn.commit()
-    conn.close()
+        cursor = conn.cursor()
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                message TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        conn.commit()
+        conn.close()
+
+        logging.info(
+            "Base de datos SQLite inicializada correctamente."
+        )
+
+    except Exception as e:
+
+        logging.error(
+            "Error inicializando SQLite: %s",
+            str(e)
+        )
+
+
+# ============================================================
+# GUARDAR MENSAJE
+# ============================================================
 
 def save_message(
     user_id: str,
@@ -145,84 +164,112 @@ def save_message(
     message: str
 ):
 
-    conn = sqlite3.connect(
-        DATABASE,
-        check_same_thread=False
-    )
+    try:
 
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO conversations
-        (user_id, role, message)
-        VALUES (?, ?, ?)
-        """,
-        (
-            user_id,
-            role,
-            message
+        conn = sqlite3.connect(
+            DATABASE,
+            check_same_thread=False
         )
-    )
 
-    conn.commit()
-    conn.close()
+        cursor = conn.cursor()
 
+        cursor.execute(
+            """
+            INSERT INTO conversations
+            (user_id, role, message)
+            VALUES (?, ?, ?)
+            """,
+            (
+                user_id,
+                role,
+                message
+            )
+        )
+
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+
+        logging.error(
+            "Error guardando mensaje: %s",
+            str(e)
+        )
+
+
+# ============================================================
+# OBTENER HISTORIAL
+# ============================================================
 
 def get_history(
     user_id: str,
     limit: int = 6
 ):
 
-    conn = sqlite3.connect(
-        DATABASE,
-        check_same_thread=False
-    )
+    try:
 
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT role, message
-        FROM conversations
-        WHERE user_id = ?
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (
-            user_id,
-            limit
+        conn = sqlite3.connect(
+            DATABASE,
+            check_same_thread=False
         )
-    )
 
-    rows = cursor.fetchall()
+        cursor = conn.cursor()
 
-    conn.close()
-
-    rows.reverse()
-
-    history = []
-
-    for role, message in rows:
-
-        if role == "user":
-
-            history.append(
-                HumanMessage(
-                    content=message
-                )
+        cursor.execute(
+            """
+            SELECT role, message
+            FROM conversations
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (
+                user_id,
+                limit
             )
+        )
 
-        elif role == "assistant":
+        rows = cursor.fetchall()
 
-            history.append(
-                AIMessage(
-                    content=message
+        conn.close()
+
+        rows.reverse()
+
+        history = []
+
+        for role, message in rows:
+
+            if role == "user":
+
+                history.append(
+                    HumanMessage(
+                        content=message
+                    )
                 )
-            )
 
-    return history
+            elif role == "assistant":
 
+                history.append(
+                    AIMessage(
+                        content=message
+                    )
+                )
+
+        return history
+
+    except Exception as e:
+
+        logging.error(
+            "Error obteniendo historial: %s",
+            str(e)
+        )
+
+        return []
+
+
+# ============================================================
+# DETECCIÓN DE IDIOMA
+# ============================================================
 
 def detect_language(
     message: str
@@ -244,12 +291,19 @@ def detect_language(
 
             return language
 
-    except Exception:
+    except Exception as e:
 
-        pass
+        logging.warning(
+            "No se pudo detectar idioma: %s",
+            str(e)
+        )
 
     return "es"
 
+
+# ============================================================
+# BÚSQUEDA EN DOCUMENTOS
+# ============================================================
 
 def search_documents(
     query: str,
@@ -287,6 +341,37 @@ def search_documents(
 
             if content:
 
+                source = document.metadata.get(
+                    "source",
+                    ""
+                )
+
+                page = document.metadata.get(
+                    "page",
+                    ""
+                )
+
+                if source:
+
+                    filename = os.path.basename(
+                        source
+                    )
+
+                    if page != "":
+
+                        content = (
+                            f"[Documento: {filename} | "
+                            f"Página: {page + 1}]\n"
+                            f"{content}"
+                        )
+
+                    else:
+
+                        content = (
+                            f"[Documento: {filename}]\n"
+                            f"{content}"
+                        )
+
                 context_parts.append(
                     content
                 )
@@ -305,6 +390,10 @@ def search_documents(
         return ""
 
 
+# ============================================================
+# PROCESAMIENTO DEL MENSAJE
+# ============================================================
+
 def process_message(
     user_id: str,
     message: str
@@ -319,16 +408,28 @@ def process_message(
         message = message.strip()
 
 
+        # ----------------------------------------------------
+        # IDIOMA
+        # ----------------------------------------------------
+
         language = detect_language(
             message
         )
 
+
+        # ----------------------------------------------------
+        # BUSCAR EN PDF
+        # ----------------------------------------------------
 
         contexto = search_documents(
             message,
             number_of_documents=4
         )
 
+
+        # ----------------------------------------------------
+        # SIN INFORMACIÓN
+        # ----------------------------------------------------
 
         if not contexto:
 
@@ -352,12 +453,20 @@ def process_message(
             return response_text
 
 
+        # ----------------------------------------------------
+        # OPENAI
+        # ----------------------------------------------------
+
         llm = ChatOpenAI(
             model="gpt-4o-mini",
             temperature=0.2,
             max_tokens=180
         )
 
+
+        # ----------------------------------------------------
+        # PROMPT
+        # ----------------------------------------------------
 
         system_prompt = f"""
 Eres un asistente virtual de hotel.
@@ -416,6 +525,10 @@ CONTEXTO DOCUMENTAL:
 """
 
 
+        # ----------------------------------------------------
+        # HISTORIAL
+        # ----------------------------------------------------
+
         history = get_history(
             user_id,
             limit=6
@@ -437,6 +550,10 @@ CONTEXTO DOCUMENTAL:
         ]
 
 
+        # ----------------------------------------------------
+        # RESPUESTA
+        # ----------------------------------------------------
+
         response = llm.invoke(
             messages
         )
@@ -446,6 +563,10 @@ CONTEXTO DOCUMENTAL:
             response.content
         ).strip()
 
+
+        # ----------------------------------------------------
+        # GUARDAR CONVERSACIÓN
+        # ----------------------------------------------------
 
         save_message(
             user_id,
@@ -476,6 +597,10 @@ CONTEXTO DOCUMENTAL:
         )
 
 
+# ============================================================
+# CONSTRUCCIÓN DEL ÍNDICE FAISS
+# ============================================================
+
 def build_index():
 
     global vector_db
@@ -495,16 +620,29 @@ def build_index():
         )
 
 
+        # ----------------------------------------------------
+        # VERIFICAR OPENAI
+        # ----------------------------------------------------
+
         if not os.getenv(
             "OPENAI_API_KEY"
         ):
 
             logging.error(
-                "OPENAI_API_KEY no está configurada."
+                "OPENAI_API_KEY no está configurada en Railway."
             )
 
             return
 
+
+        logging.info(
+            "OPENAI_API_KEY detectada en el entorno de Railway."
+        )
+
+
+        # ----------------------------------------------------
+        # RUTAS
+        # ----------------------------------------------------
 
         logging.info(
             "Directorio principal: %s",
@@ -517,6 +655,10 @@ def build_index():
         )
 
 
+        # ----------------------------------------------------
+        # CREAR CARPETA DOCUMENTS
+        # ----------------------------------------------------
+
         if not os.path.exists(
             DOCUMENTS_DIR
         ):
@@ -526,11 +668,16 @@ def build_index():
             )
 
             logging.warning(
-                "La carpeta documents no existía."
+                "La carpeta documents no existía. "
+                "Fue creada automáticamente."
             )
 
             return
 
+
+        # ----------------------------------------------------
+        # LISTAR ARCHIVOS
+        # ----------------------------------------------------
 
         files = os.listdir(
             DOCUMENTS_DIR
@@ -538,18 +685,49 @@ def build_index():
 
 
         logging.info(
-            "Archivos encontrados: %s",
+            "Archivos encontrados en documents/: %s",
             len(files)
         )
 
 
+        if not files:
+
+            logging.error(
+                "La carpeta documents está VACÍA."
+            )
+
+            logging.error(
+                "Debes colocar los archivos PDF dentro de: %s",
+                DOCUMENTS_DIR
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # MOSTRAR ARCHIVOS
+        # ----------------------------------------------------
+
         for file in files:
 
-            logging.info(
-                "Archivo encontrado: %s",
+            full_path = os.path.join(
+                DOCUMENTS_DIR,
                 file
             )
 
+            if os.path.isfile(
+                full_path
+            ):
+
+                logging.info(
+                    "Archivo encontrado: %s",
+                    file
+                )
+
+
+        # ----------------------------------------------------
+        # FILTRAR PDF
+        # ----------------------------------------------------
 
         pdf_files = [
 
@@ -573,22 +751,40 @@ def build_index():
         if not pdf_files:
 
             logging.error(
-                "NO SE ENCONTRARON ARCHIVOS PDF."
+                "=================================================="
             )
 
             logging.error(
-                "Coloca los PDFs dentro de: %s",
+                "NO SE ENCONTRARON ARCHIVOS PDF"
+            )
+
+            logging.error(
+                "Coloca los PDFs dentro de:"
+            )
+
+            logging.error(
+                "%s",
                 DOCUMENTS_DIR
+            )
+
+            logging.error(
+                "=================================================="
             )
 
             return
 
+
+        # ----------------------------------------------------
+        # MOSTRAR LISTA DE PDF
+        # ----------------------------------------------------
+
         logging.info(
-            "Lista de documentos PDF:"
+            "LISTA DE DOCUMENTOS PDF:"
         )
 
+
         for index, file in enumerate(
-            pdf_files,
+            sorted(pdf_files),
             start=1
         ):
 
@@ -599,6 +795,10 @@ def build_index():
             )
 
 
+        # ----------------------------------------------------
+        # EMBEDDINGS
+        # ----------------------------------------------------
+
         logging.info(
             "Inicializando OpenAI Embeddings..."
         )
@@ -608,12 +808,26 @@ def build_index():
         )
 
 
+        # ----------------------------------------------------
+        # DOCUMENTOS
+        # ----------------------------------------------------
+
         all_docs = []
 
         total_pages = 0
 
+        successful_pdfs = 0
 
-        for file in pdf_files:
+        failed_pdfs = 0
+
+
+        # ----------------------------------------------------
+        # LEER CADA PDF
+        # ----------------------------------------------------
+
+        for file in sorted(
+            pdf_files
+        ):
 
             file_path = os.path.join(
                 DOCUMENTS_DIR,
@@ -647,6 +861,8 @@ def build_index():
                         file_path
                     )
 
+                    failed_pdfs += 1
+
                     continue
 
 
@@ -661,7 +877,41 @@ def build_index():
                     documents
                 )
 
+
+                if pages == 0:
+
+                    logging.warning(
+                        "El PDF no contiene páginas: %s",
+                        file
+                    )
+
+                    failed_pdfs += 1
+
+                    continue
+
+
+                # --------------------------------------------
+                # METADATA DEL PDF
+                # --------------------------------------------
+
+                for document in documents:
+
+                    document.metadata[
+                        "source_file"
+                    ] = file
+
+                    document.metadata[
+                        "document_name"
+                    ] = file
+
+
                 total_pages += pages
+
+                all_docs.extend(
+                    documents
+                )
+
+                successful_pdfs += 1
 
 
                 logging.info(
@@ -675,15 +925,12 @@ def build_index():
                 )
 
 
-                all_docs.extend(
-                    documents
-                )
-
-
             except Exception as e:
 
+                failed_pdfs += 1
+
                 logging.error(
-                    "ERROR leyendo %s",
+                    "ERROR leyendo PDF: %s",
                     file
                 )
 
@@ -692,6 +939,10 @@ def build_index():
                     str(e)
                 )
 
+
+        # ----------------------------------------------------
+        # RESUMEN
+        # ----------------------------------------------------
 
         logging.info(
             "=================================================="
@@ -704,6 +955,16 @@ def build_index():
         logging.info(
             "PDF encontrados: %s",
             len(pdf_files)
+        )
+
+        logging.info(
+            "PDF cargados correctamente: %s",
+            successful_pdfs
+        )
+
+        logging.info(
+            "PDF con errores: %s",
+            failed_pdfs
         )
 
         logging.info(
@@ -721,6 +982,10 @@ def build_index():
         )
 
 
+        # ----------------------------------------------------
+        # VALIDAR DOCUMENTOS
+        # ----------------------------------------------------
+
         if not all_docs:
 
             logging.error(
@@ -730,9 +995,14 @@ def build_index():
             return
 
 
+        # ----------------------------------------------------
+        # DIVIDIR DOCUMENTOS
+        # ----------------------------------------------------
+
         logging.info(
-            "Dividiendo documentos..."
+            "Dividiendo documentos en fragmentos..."
         )
+
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=700,
@@ -760,6 +1030,10 @@ def build_index():
             return
 
 
+        # ----------------------------------------------------
+        # CREAR FAISS
+        # ----------------------------------------------------
+
         logging.info(
             "Creando índice FAISS..."
         )
@@ -771,10 +1045,18 @@ def build_index():
         )
 
 
+        # ----------------------------------------------------
+        # ACTIVAR ÍNDICE
+        # ----------------------------------------------------
+
         with index_lock:
 
             vector_db = new_vector_db
 
+
+        # ----------------------------------------------------
+        # FINAL
+        # ----------------------------------------------------
 
         logging.info(
             "=================================================="
@@ -785,8 +1067,8 @@ def build_index():
         )
 
         logging.info(
-            "PDF: %s",
-            len(pdf_files)
+            "PDF procesados: %s",
+            successful_pdfs
         )
 
         logging.info(
@@ -811,7 +1093,11 @@ def build_index():
     except Exception as e:
 
         logging.error(
-            "ERROR CONSTRUYENDO ÍNDICE"
+            "=================================================="
+        )
+
+        logging.error(
+            "ERROR CONSTRUYENDO ÍNDICE FAISS"
         )
 
         logging.error(
@@ -819,6 +1105,14 @@ def build_index():
             str(e)
         )
 
+        logging.error(
+            "=================================================="
+        )
+
+
+# ============================================================
+# WEBHOOK DE VAPI
+# ============================================================
 
 @app.post("/vapi-webhook")
 async def vapi_webhook(
@@ -828,6 +1122,11 @@ async def vapi_webhook(
     try:
 
         data = await request.json()
+
+
+        logging.info(
+            "Webhook recibido desde Vapi."
+        )
 
 
         message_data = data.get(
@@ -846,6 +1145,10 @@ async def vapi_webhook(
             }
 
 
+        # ----------------------------------------------------
+        # TOOL CALLS
+        # ----------------------------------------------------
+
         tool_calls = message_data.get(
             "toolCalls",
             []
@@ -853,6 +1156,10 @@ async def vapi_webhook(
 
 
         if not tool_calls:
+
+            logging.info(
+                "Webhook sin toolCalls."
+            )
 
             return {
                 "ok": True
@@ -871,6 +1178,10 @@ async def vapi_webhook(
                 "ok": True
             }
 
+
+        # ----------------------------------------------------
+        # FUNCIÓN
+        # ----------------------------------------------------
 
         function_data = tool_call.get(
             "function",
@@ -891,6 +1202,10 @@ async def vapi_webhook(
             {}
         )
 
+
+        # ----------------------------------------------------
+        # ARGUMENTOS JSON
+        # ----------------------------------------------------
 
         if isinstance(
             arguments,
@@ -918,6 +1233,10 @@ async def vapi_webhook(
             arguments = {}
 
 
+        # ----------------------------------------------------
+        # QUERY
+        # ----------------------------------------------------
+
         query = arguments.get(
             "query",
             ""
@@ -937,6 +1256,37 @@ async def vapi_webhook(
         query = query.strip()
 
 
+        logging.info(
+            "Consulta recibida: %s",
+            query
+        )
+
+
+        if not query:
+
+            return {
+
+                "results": [
+
+                    {
+
+                        "toolCallId":
+                            tool_call.get("id"),
+
+                        "result":
+                            "No recibí ninguna pregunta."
+
+                    }
+
+                ]
+
+            }
+
+
+        # ----------------------------------------------------
+        # IDENTIFICAR USUARIO
+        # ----------------------------------------------------
+
         customer_info = message_data.get(
             "customer",
             {}
@@ -952,9 +1302,21 @@ async def vapi_webhook(
 
 
         user_id = (
-            customer_info.get("number")
-            or customer_info.get("id")
-            or "hotel_user"
+
+            customer_info.get(
+                "number"
+            )
+
+            or
+
+            customer_info.get(
+                "id"
+            )
+
+            or
+
+            "hotel_user"
+
         )
 
 
@@ -963,11 +1325,19 @@ async def vapi_webhook(
         )
 
 
+        # ----------------------------------------------------
+        # PROCESAR
+        # ----------------------------------------------------
+
         respuesta = process_message(
             user_id,
             query
         )
 
+
+        # ----------------------------------------------------
+        # RESPUESTA A VAPI
+        # ----------------------------------------------------
 
         return {
 
@@ -975,11 +1345,11 @@ async def vapi_webhook(
 
                 {
 
-                    "toolCallId": tool_call.get(
-                        "id"
-                    ),
+                    "toolCallId":
+                        tool_call.get("id"),
 
-                    "result": respuesta
+                    "result":
+                        respuesta
 
                 }
 
@@ -991,7 +1361,7 @@ async def vapi_webhook(
     except Exception as e:
 
         logging.error(
-            "Error procesando webhook: %s",
+            "Error procesando webhook de Vapi: %s",
             str(e)
         )
 
@@ -1002,6 +1372,10 @@ async def vapi_webhook(
 
         }
 
+
+# ============================================================
+# ESTADO DE LOS DOCUMENTOS
+# ============================================================
 
 @app.get("/status-documents")
 def status_documents():
@@ -1016,16 +1390,20 @@ def status_documents():
 
             return {
 
-                "status": "error",
+                "status":
+                    "error",
 
                 "documents_folder":
                     DOCUMENTS_DIR,
 
-                "folder_exists": False,
+                "folder_exists":
+                    False,
 
-                "pdfs": [],
+                "pdfs":
+                    [],
 
-                "total_pdfs": 0,
+                "total_pdfs":
+                    0,
 
                 "index_ready":
                     vector_db is not None
@@ -1042,7 +1420,7 @@ def status_documents():
 
             file
 
-            for file in files
+            for file in sorted(files)
 
             if file.lower().endswith(
                 ".pdf"
@@ -1053,12 +1431,14 @@ def status_documents():
 
         return {
 
-            "status": "ok",
+            "status":
+                "ok",
 
             "documents_folder":
                 DOCUMENTS_DIR,
 
-            "folder_exists": True,
+            "folder_exists":
+                True,
 
             "pdfs":
                 pdf_files,
@@ -1076,12 +1456,18 @@ def status_documents():
 
         return {
 
-            "status": "error",
+            "status":
+                "error",
 
-            "error": str(e)
+            "error":
+                str(e)
 
         }
 
+
+# ============================================================
+# STARTUP
+# ============================================================
 
 @app.on_event(
     "startup"
@@ -1100,49 +1486,85 @@ async def startup():
         "=================================================="
     )
 
+
+    # --------------------------------------------------------
+    # DATABASE
+    # --------------------------------------------------------
+
     init_db()
 
+
+    # --------------------------------------------------------
+    # OPENAI
+    # --------------------------------------------------------
 
     if os.getenv(
         "OPENAI_API_KEY"
     ):
 
         logging.info(
-            "OPENAI_API_KEY detectada."
+            "OPENAI_API_KEY detectada en Railway."
         )
 
     else:
 
         logging.error(
-            "FALTA OPENAI_API_KEY."
+            "FALTA OPENAI_API_KEY en Railway."
         )
 
 
-    if VAPI_PUBLIC_KEY:
+    # --------------------------------------------------------
+    # VAPI
+    # --------------------------------------------------------
+    #
+    # IMPORTANTE:
+    #
+    # No enviamos ninguna API key al frontend.
+    #
+    # Tampoco existe:
+    #
+    # VAPI_PUBLIC_KEY = ...
+    #
+    # VAPI_ASSISTANT_ID = ...
+    #
+    # Las credenciales de Vapi deben permanecer
+    # exclusivamente en Railway.
+    #
+    # --------------------------------------------------------
+
+    if os.getenv(
+        "VAPI_PRIVATE_KEY"
+    ):
 
         logging.info(
-            "VAPI_PUBLIC_KEY detectada."
+            "Credencial privada de Vapi detectada en Railway."
         )
 
     else:
 
         logging.warning(
-            "VAPI_PUBLIC_KEY no configurada."
+            "VAPI_PRIVATE_KEY no está configurada."
         )
 
 
-    if VAPI_ASSISTANT_ID:
+    if os.getenv(
+        "VAPI_ASSISTANT_ID"
+    ):
 
         logging.info(
-            "VAPI_ASSISTANT_ID detectado."
+            "VAPI_ASSISTANT_ID detectado en Railway."
         )
 
     else:
 
         logging.warning(
-            "VAPI_ASSISTANT_ID no configurado."
+            "VAPI_ASSISTANT_ID no está configurado."
         )
 
+
+    # --------------------------------------------------------
+    # RUTAS
+    # --------------------------------------------------------
 
     logging.info(
         "BASE_DIR: %s",
@@ -1159,6 +1581,15 @@ async def startup():
         STATIC_DIR
     )
 
+    logging.info(
+        "DATABASE: %s",
+        DATABASE
+    )
+
+
+    # --------------------------------------------------------
+    # CONSTRUIR FAISS
+    # --------------------------------------------------------
 
     threading.Thread(
         target=build_index,
@@ -1166,12 +1597,19 @@ async def startup():
     ).start()
 
 
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
 @app.get("/health")
 def health_check():
 
+    global vector_db
+
     return {
 
-        "status": "ok",
+        "status":
+            "ok",
 
         "documents_folder":
             DOCUMENTS_DIR,
@@ -1179,15 +1617,33 @@ def health_check():
         "index_ready":
             vector_db is not None,
 
-        "vapi_configured":
+        "openai_configured":
             bool(
-                VAPI_PUBLIC_KEY
-                and
-                VAPI_ASSISTANT_ID
+                os.getenv(
+                    "OPENAI_API_KEY"
+                )
+            ),
+
+        "vapi_private_configured":
+            bool(
+                os.getenv(
+                    "VAPI_PRIVATE_KEY"
+                )
+            ),
+
+        "vapi_assistant_configured":
+            bool(
+                os.getenv(
+                    "VAPI_ASSISTANT_ID"
+                )
             )
 
     }
 
+
+# ============================================================
+# EJECUCIÓN
+# ============================================================
 
 if __name__ == "__main__":
 
@@ -1203,4 +1659,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
-```
