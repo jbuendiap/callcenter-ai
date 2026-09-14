@@ -1,3 +1,4 @@
+```python
 import os
 import uvicorn
 import sqlite3
@@ -24,7 +25,7 @@ from langdetect import detect, DetectorFactory
 
 
 # ==========================================================
-# CONFIGURACIÓN DE LOGS
+# CONFIGURACIÓN GENERAL
 # ==========================================================
 
 DetectorFactory.seed = 0
@@ -41,7 +42,7 @@ logging.basicConfig(
 
 app = FastAPI(
     title="Asistente Virtual",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 
@@ -61,9 +62,10 @@ app.add_middleware(
 # ==========================================================
 # VARIABLES DE RAILWAY
 #
-# Todas se obtienen exclusivamente desde Railway.
+# IMPORTANTE:
 #
-# NO se colocan claves ni IDs directamente en este archivo.
+# Las claves NO están escritas en este archivo.
+# Railway las proporciona mediante variables de entorno.
 # ==========================================================
 
 BOT_ACTIVE = os.getenv(
@@ -71,24 +73,39 @@ BOT_ACTIVE = os.getenv(
     "true"
 )
 
+
 OPENAI_API_KEY = os.getenv(
     "OPENAI_API_KEY"
 )
+
 
 PORT = os.getenv(
     "PORT",
     "8000"
 )
 
+
 TELEGRAM_TOKEN = os.getenv(
     "TELEGRAM_TOKEN"
 )
+
+
+# ----------------------------------------------------------
+# VAPI
+# ----------------------------------------------------------
 
 VAPI_PRIVATE_KEY = os.getenv(
     "VAPI_PRIVATE_KEY"
 )
 
+
+VAPI_PUBLIC_KEY = os.getenv(
+    "VAPI_PUBLIC_KEY"
+)
+
+
 VAPI_ASSISTANTS = {
+
     "es": os.getenv(
         "VAPI_ASSISTANT_ES"
     ),
@@ -108,17 +125,19 @@ VAPI_ASSISTANTS = {
 
 
 # ==========================================================
-# RUTAS DEL PROYECTO
+# RUTAS
 # ==========================================================
 
 BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
 
+
 DOCUMENTS_DIR = os.path.join(
     BASE_DIR,
     "documents"
 )
+
 
 DATABASE = os.path.join(
     BASE_DIR,
@@ -133,6 +152,7 @@ DATABASE = os.path.join(
 vector_db = None
 
 index_lock = threading.Lock()
+
 
 active_vapi_call_id = None
 
@@ -160,35 +180,60 @@ def is_bot_active():
     )
 
 
-def get_vapi_assistant(language):
+# ==========================================================
+# OBTENER ASISTENTE SEGÚN IDIOMA
+# ==========================================================
+
+def get_vapi_assistant(
+    language
+):
 
     if not language:
+
         language = "es"
 
-    language = language.lower().strip()
 
-    # Convertir variantes
+    language = str(
+        language
+    ).lower().strip()
+
+
+    # ------------------------------------------------------
+    # Normalizar idioma
+    # ------------------------------------------------------
+
     if language.startswith("es"):
+
         language = "es"
 
     elif language.startswith("en"):
+
         language = "en"
 
     elif language.startswith("fr"):
+
         language = "fr"
 
     elif language.startswith("ru"):
+
         language = "ru"
 
     else:
+
         language = "es"
 
-    assistant_id = VAPI_ASSISTANTS.get(
-        language
+
+    assistant_id = (
+        VAPI_ASSISTANTS.get(
+            language
+        )
     )
 
-    # Si no existe el asistente solicitado,
-    # utilizar español como respaldo.
+
+    # ------------------------------------------------------
+    # Fallback a español
+    # ------------------------------------------------------
+
     if not assistant_id:
 
         logging.warning(
@@ -197,14 +242,26 @@ def get_vapi_assistant(language):
             language.upper()
         )
 
+
         language = "es"
 
-        assistant_id = VAPI_ASSISTANTS.get(
-            "es"
+
+        assistant_id = (
+            VAPI_ASSISTANTS.get(
+                "es"
+            )
         )
 
-    return language, assistant_id
 
+    return (
+        language,
+        assistant_id
+    )
+
+
+# ==========================================================
+# IDIOMA DEL NAVEGADOR
+# ==========================================================
 
 def detect_browser_language(
     request: Request
@@ -215,17 +272,26 @@ def detect_browser_language(
         ""
     )
 
+
     if not header:
 
         return "es"
 
-    first_language = (
-        header
-        .split(",")[0]
-        .split("-")[0]
-        .strip()
-        .lower()
-    )
+
+    try:
+
+        first_language = (
+            header
+            .split(",")[0]
+            .split("-")[0]
+            .strip()
+            .lower()
+        )
+
+    except Exception:
+
+        return "es"
+
 
     if first_language in (
         "es",
@@ -235,6 +301,7 @@ def detect_browser_language(
     ):
 
         return first_language
+
 
     return "es"
 
@@ -247,9 +314,19 @@ def detect_browser_language(
 def home():
 
     return {
-        "status": "ok",
-        "service": "Asistente Virtual",
-        "backend": "Railway",
+
+        "status":
+            "ok",
+
+        "service":
+            "Asistente Virtual",
+
+        "backend":
+            "Railway",
+
+        "version":
+            "2.0.0",
+
         "message":
             "Backend funcionando correctamente."
     }
@@ -268,27 +345,38 @@ def init_db():
             check_same_thread=False
         )
 
+
         cursor = conn.cursor()
+
 
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS conversations (
+
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+
                 user_id TEXT NOT NULL,
+
                 role TEXT NOT NULL,
+
                 message TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+
+                timestamp DATETIME
+                DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+
 
         conn.commit()
 
         conn.close()
 
+
         logging.info(
             "Base de datos SQLite inicializada correctamente."
         )
+
 
     except Exception as e:
 
@@ -315,12 +403,18 @@ def save_message(
             check_same_thread=False
         )
 
+
         cursor = conn.cursor()
+
 
         cursor.execute(
             """
             INSERT INTO conversations
-            (user_id, role, message)
+            (
+                user_id,
+                role,
+                message
+            )
             VALUES (?, ?, ?)
             """,
             (
@@ -330,9 +424,11 @@ def save_message(
             )
         )
 
+
         conn.commit()
 
         conn.close()
+
 
     except Exception as e:
 
@@ -358,14 +454,22 @@ def get_history(
             check_same_thread=False
         )
 
+
         cursor = conn.cursor()
+
 
         cursor.execute(
             """
-            SELECT role, message
+            SELECT
+                role,
+                message
+
             FROM conversations
+
             WHERE user_id = ?
+
             ORDER BY id DESC
+
             LIMIT ?
             """,
             (
@@ -374,13 +478,18 @@ def get_history(
             )
         )
 
+
         rows = cursor.fetchall()
+
 
         conn.close()
 
+
         rows.reverse()
 
+
         history = []
+
 
         for role, message in rows:
 
@@ -392,6 +501,7 @@ def get_history(
                     )
                 )
 
+
             elif role == "assistant":
 
                 history.append(
@@ -400,7 +510,9 @@ def get_history(
                     )
                 )
 
+
         return history
+
 
     except Exception as e:
 
@@ -409,11 +521,12 @@ def get_history(
             str(e)
         )
 
+
         return []
 
 
 # ==========================================================
-# DETECTAR IDIOMA
+# DETECTAR IDIOMA DEL MENSAJE
 # ==========================================================
 
 def detect_language(
@@ -426,29 +539,41 @@ def detect_language(
 
             return "es"
 
-        if len(
-            message.strip()
-        ) < 3:
+
+        message = message.strip()
+
+
+        if len(message) < 3:
 
             return "es"
+
 
         language = detect(
             message
         )
 
+
         if language:
 
             if language.startswith("es"):
+
                 return "es"
 
+
             if language.startswith("en"):
+
                 return "en"
 
+
             if language.startswith("fr"):
+
                 return "fr"
 
+
             if language.startswith("ru"):
+
                 return "ru"
+
 
     except Exception as e:
 
@@ -456,6 +581,7 @@ def detect_language(
             "No se pudo detectar idioma: %s",
             str(e)
         )
+
 
     return "es"
 
@@ -471,6 +597,7 @@ def search_documents(
 
     global vector_db
 
+
     if vector_db is None:
 
         logging.warning(
@@ -478,6 +605,7 @@ def search_documents(
         )
 
         return ""
+
 
     try:
 
@@ -490,11 +618,14 @@ def search_documents(
                 )
             )
 
+
         if not documents:
 
             return ""
 
+
         context_parts = []
+
 
         for document in documents:
 
@@ -502,13 +633,19 @@ def search_documents(
                 document.page_content.strip()
             )
 
+
             if not content:
+
                 continue
 
-            source = document.metadata.get(
-                "source",
-                ""
+
+            source = (
+                document.metadata.get(
+                    "source",
+                    ""
+                )
             )
+
 
             document_name = (
                 document.metadata.get(
@@ -517,24 +654,35 @@ def search_documents(
                 )
             )
 
-            page = document.metadata.get(
-                "page",
-                None
+
+            page = (
+                document.metadata.get(
+                    "page",
+                    None
+                )
             )
+
 
             if document_name:
 
-                source_name = document_name
+                source_name = (
+                    document_name
+                )
 
             elif source:
 
-                source_name = os.path.basename(
-                    source
+                source_name = (
+                    os.path.basename(
+                        source
+                    )
                 )
 
             else:
 
-                source_name = "Documento"
+                source_name = (
+                    "Documento"
+                )
+
 
             if page is not None:
 
@@ -548,24 +696,31 @@ def search_documents(
 
                     page_number = page
 
+
                 header = (
-                    f"[Documento: {source_name} | "
-                    f"Página: {page_number}]"
+                    f"[Documento: "
+                    f"{source_name} | "
+                    f"Página: "
+                    f"{page_number}]"
                 )
 
             else:
 
                 header = (
-                    f"[Documento: {source_name}]"
+                    f"[Documento: "
+                    f"{source_name}]"
                 )
+
 
             context_parts.append(
                 f"{header}\n{content}"
             )
 
+
         return "\n\n".join(
             context_parts
         )
+
 
     except Exception as e:
 
@@ -573,6 +728,7 @@ def search_documents(
             "Error buscando documentos: %s",
             str(e)
         )
+
 
         return ""
 
@@ -588,35 +744,51 @@ def process_message(
 
     try:
 
-        if not message or not message.strip():
+        if (
+            not message
+            or
+            not message.strip()
+        ):
 
             return (
                 "No recibí ninguna pregunta."
             )
 
-        message = message.strip()
 
-        language = detect_language(
-            message
+        message = (
+            message.strip()
         )
+
+
+        language = (
+            detect_language(
+                message
+            )
+        )
+
 
         logging.info(
             "Idioma detectado: %s",
             language
         )
 
-        contexto = search_documents(
-            message,
-            number_of_documents=4
+
+        contexto = (
+            search_documents(
+                message,
+                number_of_documents=4
+            )
         )
+
 
         if not contexto:
 
             response_text = (
-                "Lo siento, no dispongo de "
-                "información suficiente para "
-                "responder esa pregunta."
+                "Lo siento, no dispongo "
+                "de información suficiente "
+                "para responder esa pregunta."
             )
+
 
             save_message(
                 user_id,
@@ -624,19 +796,34 @@ def process_message(
                 message
             )
 
+
             save_message(
                 user_id,
                 "assistant",
                 response_text
             )
 
+
             return response_text
 
+
+        # --------------------------------------------------
+        # MODELO
+        # --------------------------------------------------
+
         llm = ChatOpenAI(
+
             model="gpt-4o-mini",
+
             temperature=0.2,
+
             max_tokens=180
         )
+
+
+        # --------------------------------------------------
+        # INSTRUCCIONES
+        # --------------------------------------------------
 
         system_prompt = f"""
 Eres un asistente virtual.
@@ -695,35 +882,47 @@ no aparece en los documentos, dilo claramente.
 
 18. No utilices conocimiento externo.
 
-IDIOMA:
+IDIOMA DEL USUARIO:
 {language}
 
 CONTEXTO DOCUMENTAL:
 {contexto}
 """
 
-        history = get_history(
-            user_id,
-            limit=6
+
+        history = (
+            get_history(
+                user_id,
+                limit=6
+            )
         )
 
+
         messages = [
+
             SystemMessage(
                 content=system_prompt
             ),
+
             *history,
+
             HumanMessage(
                 content=message
             )
         ]
 
-        response = llm.invoke(
-            messages
+
+        response = (
+            llm.invoke(
+                messages
+            )
         )
+
 
         response_text = str(
             response.content
         ).strip()
+
 
         save_message(
             user_id,
@@ -731,13 +930,16 @@ CONTEXTO DOCUMENTAL:
             message
         )
 
+
         save_message(
             user_id,
             "assistant",
             response_text
         )
 
+
         return response_text
+
 
     except Exception as e:
 
@@ -746,28 +948,35 @@ CONTEXTO DOCUMENTAL:
             str(e)
         )
 
+
         return (
-            "Lo siento, no puedo proporcionar "
-            "esa información en este momento."
+            "Lo siento, no puedo "
+            "proporcionar esa información "
+            "en este momento."
         )
 
 
 # ==========================================================
-# INICIAR VAPI
+# CONFIGURACIÓN PARA EL WEB SDK DE VAPI
+#
+# ESTA ES LA RUTA QUE UTILIZA app.js
+#
+# IMPORTANTE:
+#
+# Se envía PUBLIC KEY.
+#
+# NUNCA se envía PRIVATE KEY.
 # ==========================================================
 
-@app.post("/vapi/start")
-async def vapi_start(
+@app.get("/vapi/config")
+async def vapi_config(
     request: Request
 ):
-
-    global active_vapi_call_id
-    global active_vapi_language
 
     try:
 
         # --------------------------------------------------
-        # BOT_ACTIVE
+        # BOT ACTIVE
         # --------------------------------------------------
 
         if not is_bot_active():
@@ -776,16 +985,179 @@ async def vapi_start(
                 "BOT_ACTIVE está desactivado."
             )
 
+
             return {
-                "success": False,
-                "active": False,
+
+                "success":
+                    False,
+
+                "active":
+                    False,
+
                 "error":
                     "El asistente está desactivado."
             }
 
 
         # --------------------------------------------------
-        # VAPI PRIVATE KEY
+        # PUBLIC KEY
+        # --------------------------------------------------
+
+        if not VAPI_PUBLIC_KEY:
+
+            logging.error(
+                "Falta VAPI_PUBLIC_KEY en Railway."
+            )
+
+
+            return {
+
+                "success":
+                    False,
+
+                "error":
+                    "VAPI_PUBLIC_KEY no está configurada."
+            }
+
+
+        # --------------------------------------------------
+        # IDIOMA DEL NAVEGADOR
+        # --------------------------------------------------
+
+        language = (
+            detect_browser_language(
+                request
+            )
+        )
+
+
+        # --------------------------------------------------
+        # ASSISTANT ID
+        # --------------------------------------------------
+
+        language, assistant_id = (
+            get_vapi_assistant(
+                language
+            )
+        )
+
+
+        if not assistant_id:
+
+            logging.error(
+                "No existe Assistant ID para idioma %s.",
+                language
+            )
+
+
+            return {
+
+                "success":
+                    False,
+
+                "error":
+                    "No existe un asistente Vapi configurado."
+            }
+
+
+        logging.info(
+            "Configuración Vapi solicitada."
+        )
+
+
+        logging.info(
+            "Idioma seleccionado: %s",
+            language
+        )
+
+
+        # --------------------------------------------------
+        # RESPUESTA
+        #
+        # NO incluir PRIVATE KEY.
+        # --------------------------------------------------
+
+        return {
+
+            "success":
+                True,
+
+            "active":
+                True,
+
+            "public_key":
+                VAPI_PUBLIC_KEY,
+
+            "assistant_id":
+                assistant_id,
+
+            "language":
+                language
+        }
+
+
+    except Exception as e:
+
+        logging.error(
+            "Error obteniendo configuración Vapi: %s",
+            str(e)
+        )
+
+
+        return {
+
+            "success":
+                False,
+
+            "error":
+                "No se pudo obtener la configuración Vapi."
+        }
+
+
+# ==========================================================
+# INICIAR VAPI MEDIANTE API
+#
+# ESTA RUTA SE MANTIENE PARA COMPATIBILIDAD.
+#
+# El app.js del navegador utiliza directamente:
+#
+# vapi.start(assistant_id)
+#
+# ==========================================================
+
+@app.post("/vapi/start")
+async def vapi_start(
+    request: Request
+):
+
+    global active_vapi_call_id
+
+    global active_vapi_language
+
+
+    try:
+
+        # --------------------------------------------------
+        # BOT ACTIVE
+        # --------------------------------------------------
+
+        if not is_bot_active():
+
+            return {
+
+                "success":
+                    False,
+
+                "active":
+                    False,
+
+                "error":
+                    "El asistente está desactivado."
+            }
+
+
+        # --------------------------------------------------
+        # PRIVATE KEY
         # --------------------------------------------------
 
         if not VAPI_PRIVATE_KEY:
@@ -794,15 +1166,19 @@ async def vapi_start(
                 "Falta VAPI_PRIVATE_KEY en Railway."
             )
 
+
             return {
-                "success": False,
+
+                "success":
+                    False,
+
                 "error":
                     "Vapi no está configurado."
             }
 
 
         # --------------------------------------------------
-        # OBTENER DATOS DEL FRONTEND
+        # LEER DATOS
         # --------------------------------------------------
 
         try:
@@ -822,14 +1198,15 @@ async def vapi_start(
             data = {}
 
 
-        requested_language = data.get(
-            "language"
+        requested_language = (
+            data.get(
+                "language"
+            )
         )
 
 
         # --------------------------------------------------
-        # SI NO VIENE IDIOMA:
-        # USAR IDIOMA DEL NAVEGADOR
+        # IDIOMA DEL NAVEGADOR
         # --------------------------------------------------
 
         if not requested_language:
@@ -850,59 +1227,48 @@ async def vapi_start(
 
         if not assistant_id:
 
-            logging.error(
-                "No hay Assistant ID para idioma: %s",
-                language
-            )
-
             return {
-                "success": False,
+
+                "success":
+                    False,
+
                 "error":
                     "No existe un asistente Vapi configurado."
             }
 
 
-        logging.info(
-            "Idioma seleccionado: %s",
-            language
-        )
-
-        logging.info(
-            "Assistant seleccionado para %s.",
-            language
-        )
-
-
         # --------------------------------------------------
-        # COMPROBAR SI YA HAY UNA LLAMADA ACTIVA
+        # COMPROBAR LLAMADA ACTIVA
         # --------------------------------------------------
 
         with vapi_call_lock:
 
             if active_vapi_call_id:
 
-                logging.info(
-                    "Ya existe una llamada activa: %s",
-                    active_vapi_call_id
-                )
-
                 return {
-                    "success": True,
-                    "already_active": True,
+
+                    "success":
+                        True,
+
+                    "already_active":
+                        True,
+
                     "call_id":
                         active_vapi_call_id,
+
                     "language":
                         active_vapi_language
                 }
 
 
         # --------------------------------------------------
-        # CREAR WEB CALL EN VAPI
+        # CREAR WEB CALL
         # --------------------------------------------------
 
         url = (
             "https://api.vapi.ai/call"
         )
+
 
         headers = {
 
@@ -912,6 +1278,7 @@ async def vapi_start(
             "Content-Type":
                 "application/json"
         }
+
 
         payload = {
 
@@ -925,14 +1292,18 @@ async def vapi_start(
 
 
         logging.info(
-            "Creando Web Call en Vapi..."
+            "Creando Web Call mediante API Vapi..."
         )
 
 
         response = requests.post(
+
             url,
+
             headers=headers,
+
             json=payload,
+
             timeout=30
         )
 
@@ -946,42 +1317,50 @@ async def vapi_start(
         if response.status_code >= 400:
 
             logging.error(
-                "Respuesta de error Vapi: %s",
+                "Respuesta Vapi: %s",
                 response.text
             )
 
+
             return {
-                "success": False,
+
+                "success":
+                    False,
+
                 "error":
                     "Vapi rechazó la creación de la llamada.",
+
                 "vapi_status":
                     response.status_code
             }
 
 
-        vapi_data = response.json()
+        vapi_data = (
+            response.json()
+        )
 
 
-        call_id = vapi_data.get(
-            "id"
+        call_id = (
+            vapi_data.get(
+                "id"
+            )
         )
 
 
         if not call_id:
 
-            logging.error(
-                "Vapi no devolvió call ID."
-            )
-
             return {
-                "success": False,
+
+                "success":
+                    False,
+
                 "error":
                     "Vapi no devolvió el ID de la llamada."
             }
 
 
         # --------------------------------------------------
-        # GUARDAR LLAMADA ACTIVA
+        # GUARDAR ESTADO
         # --------------------------------------------------
 
         with vapi_call_lock:
@@ -996,31 +1375,21 @@ async def vapi_start(
 
 
         logging.info(
-            "=============================================="
-        )
-
-        logging.info(
             "VAPI WEB CALL CREADA"
         )
+
 
         logging.info(
             "Call ID: %s",
             call_id
         )
 
+
         logging.info(
             "Idioma: %s",
             language
         )
 
-        logging.info(
-            "=============================================="
-        )
-
-
-        # --------------------------------------------------
-        # DEVOLVER INFORMACIÓN AL FRONTEND
-        # --------------------------------------------------
 
         return {
 
@@ -1048,8 +1417,12 @@ async def vapi_start(
             str(e)
         )
 
+
         return {
-            "success": False,
+
+            "success":
+                False,
+
             "error":
                 "No se pudo conectar con Vapi."
         }
@@ -1062,8 +1435,12 @@ async def vapi_start(
             str(e)
         )
 
+
         return {
-            "success": False,
+
+            "success":
+                False,
+
             "error":
                 "Error interno iniciando el asistente."
         }
@@ -1077,9 +1454,15 @@ async def vapi_start(
 async def vapi_stop():
 
     global active_vapi_call_id
+
     global active_vapi_language
 
+
     try:
+
+        # --------------------------------------------------
+        # PRIVATE KEY
+        # --------------------------------------------------
 
         if not VAPI_PRIVATE_KEY:
 
@@ -1087,12 +1470,20 @@ async def vapi_stop():
                 "Falta VAPI_PRIVATE_KEY."
             )
 
+
             return {
-                "success": False,
+
+                "success":
+                    False,
+
                 "error":
                     "Vapi no está configurado."
             }
 
+
+        # --------------------------------------------------
+        # OBTENER CALL ID
+        # --------------------------------------------------
 
         with vapi_call_lock:
 
@@ -1101,22 +1492,30 @@ async def vapi_stop():
             )
 
 
+        # --------------------------------------------------
+        # NO HAY LLAMADA REGISTRADA
+        # --------------------------------------------------
+
         if not call_id:
 
             return {
-                "success": True,
+
+                "success":
+                    True,
+
                 "message":
-                    "No hay una llamada activa."
+                    "No hay una llamada registrada en Railway."
             }
 
 
         # --------------------------------------------------
-        # ACTUALIZAR LLAMADA
+        # FINALIZAR VAPI
         # --------------------------------------------------
 
         url = (
             f"https://api.vapi.ai/call/{call_id}"
         )
+
 
         headers = {
 
@@ -1127,8 +1526,11 @@ async def vapi_stop():
                 "application/json"
         }
 
+
         payload = {
-            "status": "ended"
+
+            "status":
+                "ended"
         }
 
 
@@ -1139,9 +1541,13 @@ async def vapi_stop():
 
 
         response = requests.patch(
+
             url,
+
             headers=headers,
+
             json=payload,
+
             timeout=30
         )
 
@@ -1159,10 +1565,15 @@ async def vapi_stop():
                 response.text
             )
 
+
             return {
-                "success": False,
+
+                "success":
+                    False,
+
                 "error":
                     "Vapi no permitió finalizar la llamada.",
+
                 "vapi_status":
                     response.status_code
             }
@@ -1196,8 +1607,12 @@ async def vapi_stop():
             str(e)
         )
 
+
         return {
-            "success": False,
+
+            "success":
+                False,
+
             "error":
                 "No se pudo conectar con Vapi."
         }
@@ -1210,15 +1625,19 @@ async def vapi_stop():
             str(e)
         )
 
+
         return {
-            "success": False,
+
+            "success":
+                False,
+
             "error":
                 "Error interno finalizando el asistente."
         }
 
 
 # ==========================================================
-# WEBHOOK DE VAPI
+# WEBHOOK VAPI
 # ==========================================================
 
 @app.post("/vapi-webhook")
@@ -1230,14 +1649,19 @@ async def vapi_webhook(
 
         data = await request.json()
 
+
         logging.info(
             "Webhook recibido de Vapi."
         )
 
-        message_data = data.get(
-            "message",
-            {}
+
+        message_data = (
+            data.get(
+                "message",
+                {}
+            )
         )
+
 
         if not isinstance(
             message_data,
@@ -1260,6 +1684,39 @@ async def vapi_webhook(
             "Tipo de mensaje Vapi: %s",
             message_type
         )
+
+
+        # --------------------------------------------------
+        # ACTUALIZAR CALL ID SI VAPI LO ENVÍA
+        # --------------------------------------------------
+
+        call_data = (
+            message_data.get(
+                "call",
+                {}
+            )
+        )
+
+
+        if isinstance(
+            call_data,
+            dict
+        ):
+
+            incoming_call_id = (
+                call_data.get(
+                    "id"
+                )
+            )
+
+
+            if incoming_call_id:
+
+                with vapi_call_lock:
+
+                    active_vapi_call_id = (
+                        incoming_call_id
+                    )
 
 
         # --------------------------------------------------
@@ -1320,6 +1777,10 @@ async def vapi_webhook(
         )
 
 
+        # --------------------------------------------------
+        # ARGUMENTOS COMO JSON
+        # --------------------------------------------------
+
         if isinstance(
             arguments,
             str
@@ -1334,6 +1795,7 @@ async def vapi_webhook(
             except Exception:
 
                 arguments = {
+
                     "query":
                         arguments
                 }
@@ -1347,9 +1809,11 @@ async def vapi_webhook(
             arguments = {}
 
 
-        query = arguments.get(
-            "query",
-            ""
+        query = (
+            arguments.get(
+                "query",
+                ""
+            )
         )
 
 
@@ -1363,14 +1827,19 @@ async def vapi_webhook(
             )
 
 
-        query = query.strip()
+        query = (
+            query.strip()
+        )
 
 
         if not query:
 
             return {
+
                 "results": [
+
                     {
+
                         "toolCallId":
                             tool_call.get("id"),
 
@@ -1382,7 +1851,7 @@ async def vapi_webhook(
 
 
         # --------------------------------------------------
-        # IDENTIFICACIÓN DEL USUARIO
+        # USUARIO
         # --------------------------------------------------
 
         customer_info = (
@@ -1428,9 +1897,11 @@ async def vapi_webhook(
         # PROCESAR CONSULTA
         # --------------------------------------------------
 
-        respuesta = process_message(
-            user_id,
-            query
+        respuesta = (
+            process_message(
+                user_id,
+                query
+            )
         )
 
 
@@ -1445,11 +1916,8 @@ async def vapi_webhook(
 
                     "result":
                         respuesta
-
                 }
-
             ]
-
         }
 
 
@@ -1460,7 +1928,9 @@ async def vapi_webhook(
             str(e)
         )
 
+
         return {
+
             "error":
                 "Error procesando la solicitud."
         }
@@ -1474,6 +1944,7 @@ async def vapi_webhook(
 def status_documents():
 
     global vector_db
+
 
     try:
 
@@ -1519,7 +1990,6 @@ def status_documents():
             if file.lower().endswith(
                 ".pdf"
             )
-
         ]
 
 
@@ -1542,7 +2012,6 @@ def status_documents():
 
             "index_ready":
                 vector_db is not None
-
         }
 
 
@@ -1555,7 +2024,6 @@ def status_documents():
 
             "error":
                 str(e)
-
         }
 
 
@@ -1567,6 +2035,7 @@ def status_documents():
 def health_check():
 
     global vector_db
+
 
     with vapi_call_lock:
 
@@ -1586,6 +2055,9 @@ def health_check():
 
         "backend":
             "Railway",
+
+        "version":
+            "2.0.0",
 
         "bot_active":
             is_bot_active(),
@@ -1611,26 +2083,39 @@ def health_check():
                 VAPI_PRIVATE_KEY
             ),
 
+        "vapi_public_configured":
+            bool(
+                VAPI_PUBLIC_KEY
+            ),
+
         "vapi_assistants": {
 
             "es":
                 bool(
-                    VAPI_ASSISTANTS.get("es")
+                    VAPI_ASSISTANTS.get(
+                        "es"
+                    )
                 ),
 
             "en":
                 bool(
-                    VAPI_ASSISTANTS.get("en")
+                    VAPI_ASSISTANTS.get(
+                        "en"
+                    )
                 ),
 
             "fr":
                 bool(
-                    VAPI_ASSISTANTS.get("fr")
+                    VAPI_ASSISTANTS.get(
+                        "fr"
+                    )
                 ),
 
             "ru":
                 bool(
-                    VAPI_ASSISTANTS.get("ru")
+                    VAPI_ASSISTANTS.get(
+                        "ru"
+                    )
                 )
         },
 
@@ -1652,6 +2137,7 @@ def build_index():
 
     global vector_db
 
+
     try:
 
         logging.info(
@@ -1667,6 +2153,10 @@ def build_index():
         )
 
 
+        # --------------------------------------------------
+        # OPENAI
+        # --------------------------------------------------
+
         if not OPENAI_API_KEY:
 
             logging.error(
@@ -1680,6 +2170,10 @@ def build_index():
             "OPENAI_API_KEY detectada."
         )
 
+
+        # --------------------------------------------------
+        # DIRECTORIOS
+        # --------------------------------------------------
 
         logging.info(
             "Directorio principal: %s",
@@ -1701,16 +2195,23 @@ def build_index():
                 DOCUMENTS_DIR
             )
 
+
             logging.warning(
                 "La carpeta documents no existía."
             )
+
 
             logging.warning(
                 "Fue creada automáticamente."
             )
 
+
             return
 
+
+        # --------------------------------------------------
+        # ARCHIVOS
+        # --------------------------------------------------
 
         files = os.listdir(
             DOCUMENTS_DIR
@@ -1741,6 +2242,7 @@ def build_index():
                 file
             )
 
+
             if os.path.isfile(
                 full_path
             ):
@@ -1750,6 +2252,10 @@ def build_index():
                     file
                 )
 
+
+        # --------------------------------------------------
+        # PDF
+        # --------------------------------------------------
 
         pdf_files = [
 
@@ -1762,7 +2268,6 @@ def build_index():
             if file.lower().endswith(
                 ".pdf"
             )
-
         ]
 
 
@@ -1798,8 +2303,14 @@ def build_index():
             )
 
 
+        # --------------------------------------------------
+        # EMBEDDINGS
+        # --------------------------------------------------
+
         embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-small"
+
+            model=
+                "text-embedding-3-small"
         )
 
 
@@ -1811,6 +2322,10 @@ def build_index():
 
         failed_pdfs = 0
 
+
+        # --------------------------------------------------
+        # LEER CADA PDF
+        # --------------------------------------------------
 
         for file in pdf_files:
 
@@ -1837,7 +2352,11 @@ def build_index():
                     file_path
                 )
 
-                documents = loader.load()
+
+                documents = (
+                    loader.load()
+                )
+
 
                 pages = len(
                     documents
@@ -1848,14 +2367,24 @@ def build_index():
 
                     failed_pdfs += 1
 
+                    logging.error(
+                        "PDF vacío: %s",
+                        file
+                    )
+
                     continue
 
+
+                # --------------------------------------------------
+                # METADATA
+                # --------------------------------------------------
 
                 for document in documents:
 
                     document.metadata[
                         "document_name"
                     ] = file
+
 
                     document.metadata[
                         "source_file"
@@ -1864,9 +2393,11 @@ def build_index():
 
                 total_pages += pages
 
+
                 all_docs.extend(
                     documents
                 )
+
 
                 successful_pdfs += 1
 
@@ -1875,6 +2406,7 @@ def build_index():
                     "PDF CARGADO CORRECTAMENTE: %s",
                     file
                 )
+
 
                 logging.info(
                     "Páginas: %s",
@@ -1886,6 +2418,7 @@ def build_index():
 
                 failed_pdfs += 1
 
+
                 logging.error(
                     "ERROR LEYENDO PDF %s: %s",
                     file,
@@ -1893,29 +2426,38 @@ def build_index():
                 )
 
 
+        # --------------------------------------------------
+        # RESUMEN
+        # --------------------------------------------------
+
         logging.info(
             "=================================================="
         )
+
 
         logging.info(
             "PDF encontrados: %s",
             len(pdf_files)
         )
 
+
         logging.info(
             "PDF cargados: %s",
             successful_pdfs
         )
+
 
         logging.info(
             "PDF con errores: %s",
             failed_pdfs
         )
 
+
         logging.info(
             "Páginas cargadas: %s",
             total_pages
         )
+
 
         logging.info(
             "=================================================="
@@ -1931,17 +2473,24 @@ def build_index():
             return
 
 
-        splitter = RecursiveCharacterTextSplitter(
+        # --------------------------------------------------
+        # SPLITTER
+        # --------------------------------------------------
 
-            chunk_size=700,
+        splitter = (
+            RecursiveCharacterTextSplitter(
 
-            chunk_overlap=100
+                chunk_size=700,
 
+                chunk_overlap=100
+            )
         )
 
 
-        chunks = splitter.split_documents(
-            all_docs
+        chunks = (
+            splitter.split_documents(
+                all_docs
+            )
         )
 
 
@@ -1960,48 +2509,70 @@ def build_index():
             return
 
 
+        # --------------------------------------------------
+        # FAISS
+        # --------------------------------------------------
+
         logging.info(
             "Creando índice FAISS..."
         )
 
 
-        new_vector_db = FAISS.from_documents(
-            chunks,
-            embeddings
+        new_vector_db = (
+            FAISS.from_documents(
+                chunks,
+                embeddings
+            )
         )
 
 
+        # --------------------------------------------------
+        # REEMPLAZAR ÍNDICE
+        # --------------------------------------------------
+
         with index_lock:
 
-            vector_db = new_vector_db
+            vector_db = (
+                new_vector_db
+            )
 
+
+        # --------------------------------------------------
+        # FINAL
+        # --------------------------------------------------
 
         logging.info(
             "=================================================="
         )
 
+
         logging.info(
             "ÍNDICE FAISS CREADO CORRECTAMENTE"
         )
+
 
         logging.info(
             "PDF procesados: %s",
             successful_pdfs
         )
 
+
         logging.info(
             "Páginas procesadas: %s",
             total_pages
         )
+
 
         logging.info(
             "Chunks: %s",
             len(chunks)
         )
 
+
         logging.info(
             "RAG LISTO"
         )
+
 
         logging.info(
             "=================================================="
@@ -2029,24 +2600,31 @@ async def startup():
         "=================================================="
     )
 
+
     logging.info(
         "SERVICIO INICIANDO"
     )
 
+
     logging.info(
         "BACKEND: RAILWAY"
     )
+
 
     logging.info(
         "=================================================="
     )
 
 
+    # ------------------------------------------------------
+    # DATABASE
+    # ------------------------------------------------------
+
     init_db()
 
 
     # ------------------------------------------------------
-    # VARIABLES
+    # BOT
     # ------------------------------------------------------
 
     logging.info(
@@ -2054,6 +2632,10 @@ async def startup():
         is_bot_active()
     )
 
+
+    # ------------------------------------------------------
+    # OPENAI
+    # ------------------------------------------------------
 
     if OPENAI_API_KEY:
 
@@ -2068,6 +2650,10 @@ async def startup():
         )
 
 
+    # ------------------------------------------------------
+    # VAPI PRIVATE
+    # ------------------------------------------------------
+
     if VAPI_PRIVATE_KEY:
 
         logging.info(
@@ -2076,10 +2662,31 @@ async def startup():
 
     else:
 
-        logging.error(
-            "FALTA VAPI_PRIVATE_KEY."
+        logging.warning(
+            "VAPI_PRIVATE_KEY no configurada."
         )
 
+
+    # ------------------------------------------------------
+    # VAPI PUBLIC
+    # ------------------------------------------------------
+
+    if VAPI_PUBLIC_KEY:
+
+        logging.info(
+            "VAPI_PUBLIC_KEY detectada."
+        )
+
+    else:
+
+        logging.error(
+            "FALTA VAPI_PUBLIC_KEY."
+        )
+
+
+    # ------------------------------------------------------
+    # TELEGRAM
+    # ------------------------------------------------------
 
     if TELEGRAM_TOKEN:
 
@@ -2095,7 +2702,7 @@ async def startup():
 
 
     # ------------------------------------------------------
-    # ASISTENTES VAPI
+    # ASISTENTES
     # ------------------------------------------------------
 
     for language, assistant_id in (
@@ -2117,15 +2724,21 @@ async def startup():
             )
 
 
+    # ------------------------------------------------------
+    # DIRECTORIOS
+    # ------------------------------------------------------
+
     logging.info(
         "BASE_DIR: %s",
         BASE_DIR
     )
 
+
     logging.info(
         "DOCUMENTS_DIR: %s",
         DOCUMENTS_DIR
     )
+
 
     logging.info(
         "DATABASE: %s",
@@ -2134,12 +2747,15 @@ async def startup():
 
 
     # ------------------------------------------------------
-    # CONSTRUIR ÍNDICE EN SEGUNDO PLANO
+    # CREAR ÍNDICE EN SEGUNDO PLANO
     # ------------------------------------------------------
 
     threading.Thread(
+
         target=build_index,
+
         daemon=True
+
     ).start()
 
 
@@ -2153,6 +2769,7 @@ if __name__ == "__main__":
         PORT
     )
 
+
     uvicorn.run(
 
         app,
@@ -2161,3 +2778,4 @@ if __name__ == "__main__":
 
         port=port
     )
+```
