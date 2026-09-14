@@ -789,6 +789,22 @@ CONTEXTO DOCUMENTAL:
 
 # ==========================================================
 # PREPARAR VAPI PARA EL NAVEGADOR
+#
+# IMPORTANTE:
+#
+# Esta ruta NO crea una llamada Vapi.
+#
+# Su función es entregar al navegador:
+#
+# - Public Key
+# - Assistant ID
+# - Idioma
+#
+# El navegador después ejecuta:
+#
+# vapi.start(assistant_id)
+#
+# Esto es lo que permite utilizar el micrófono.
 # ==========================================================
 
 @app.post("/vapi/start")
@@ -899,6 +915,7 @@ async def vapi_start(
         )
 
 
+        # NO SE ENVÍA PRIVATE KEY.
         return {
 
             "success":
@@ -1054,6 +1071,13 @@ async def vapi_client_ended():
 
 # ==========================================================
 # DETENER VAPI
+#
+# Esta ruta queda como respaldo.
+#
+# El navegador realmente debe ejecutar:
+#
+# vapi.stop()
+#
 # ==========================================================
 
 @app.post("/vapi/stop")
@@ -1757,21 +1781,22 @@ def build_index():
         )
 
         logging.info(
-            "RESUMEN DE CARGA DE PDFS:"
+            "PDF encontrados: %s",
+            len(pdf_files)
         )
 
         logging.info(
-            "PDFs procesados con éxito: %s",
+            "PDF cargados: %s",
             successful_pdfs
         )
 
         logging.info(
-            "PDFs con errores: %s",
+            "PDF con errores: %s",
             failed_pdfs
         )
 
         logging.info(
-            "Total de páginas leídas: %s",
+            "Páginas cargadas: %s",
             total_pages
         )
 
@@ -1783,46 +1808,52 @@ def build_index():
         if not all_docs:
 
             logging.error(
-                "No hay documentos para indexar."
+                "No se pudo extraer contenido de los PDF."
+            )
+
+            return
+
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=700,
+            chunk_overlap=100
+        )
+
+
+        chunks = splitter.split_documents(
+            all_docs
+        )
+
+
+        logging.info(
+            "Chunks creados: %s",
+            len(chunks)
+        )
+
+
+        if not chunks:
+
+            logging.error(
+                "No se generaron chunks."
             )
 
             return
 
 
         logging.info(
-            "Iniciando división de texto en fragmentos (chunks)..."
+            "Creando índice FAISS..."
         )
 
 
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
-        )
-
-        docs = text_splitter.split_documents(
-            all_docs
-        )
-
-
-        logging.info(
-            "Fragmentos generados: %s",
-            len(docs)
-        )
-
-        logging.info(
-            "Creando índice FAISS con OpenAIEmbeddings..."
-        )
-
-
-        db = FAISS.from_documents(
-            docs,
+        new_vector_db = FAISS.from_documents(
+            chunks,
             embeddings
         )
 
 
         with index_lock:
 
-            vector_db = db
+            vector_db = new_vector_db
 
 
         logging.info(
@@ -1830,43 +1861,181 @@ def build_index():
         )
 
         logging.info(
-            "¡ÍNDICE FAISS CREADO EXITOSAMENTE!"
+            "ÍNDICE FAISS CREADO CORRECTAMENTE"
+        )
+
+        logging.info(
+            "PDF procesados: %s",
+            successful_pdfs
+        )
+
+        logging.info(
+            "Páginas procesadas: %s",
+            total_pages
+        )
+
+        logging.info(
+            "Chunks: %s",
+            len(chunks)
+        )
+
+        logging.info(
+            "RAG LISTO"
         )
 
         logging.info(
             "=================================================="
         )
+
 
     except Exception as e:
 
         logging.error(
-            "Error crítico construyendo el índice FAISS: %s",
+            "ERROR CONSTRUYENDO ÍNDICE FAISS: %s",
             str(e)
         )
 
 
 # ==========================================================
-# INICIO DE LA APLICACIÓN
+# STARTUP
 # ==========================================================
 
-@app.on_event("startup")
-def startup_event():
+@app.on_event(
+    "startup"
+)
+async def startup():
+
+    logging.info(
+        "=================================================="
+    )
+
+    logging.info(
+        "SERVICIO INICIANDO"
+    )
+
+    logging.info(
+        "BACKEND: RAILWAY"
+    )
+
+    logging.info(
+        "=================================================="
+    )
+
 
     init_db()
 
-    # Iniciar la construcción del índice FAISS en un hilo separado
-    # para evitar bloquear el arranque del servidor web en Railway.
+
+    logging.info(
+        "BOT_ACTIVE configurado: %s",
+        is_bot_active()
+    )
+
+
+    if OPENAI_API_KEY:
+
+        logging.info(
+            "OPENAI_API_KEY detectada."
+        )
+
+    else:
+
+        logging.error(
+            "FALTA OPENAI_API_KEY."
+        )
+
+
+    if VAPI_PRIVATE_KEY:
+
+        logging.info(
+            "VAPI_PRIVATE_KEY detectada."
+        )
+
+    else:
+
+        logging.error(
+            "FALTA VAPI_PRIVATE_KEY."
+        )
+
+
+    if VAPI_PUBLIC_KEY:
+
+        logging.info(
+            "VAPI_PUBLIC_KEY detectada."
+        )
+
+    else:
+
+        logging.error(
+            "FALTA VAPI_PUBLIC_KEY."
+        )
+
+
+    if TELEGRAM_TOKEN:
+
+        logging.info(
+            "TELEGRAM_TOKEN detectado."
+        )
+
+    else:
+
+        logging.warning(
+            "TELEGRAM_TOKEN no configurado."
+        )
+
+
+    for language, assistant_id in (
+        VAPI_ASSISTANTS.items()
+    ):
+
+        if assistant_id:
+
+            logging.info(
+                "VAPI_ASSISTANT_%s configurado.",
+                language.upper()
+            )
+
+        else:
+
+            logging.warning(
+                "VAPI_ASSISTANT_%s no configurado.",
+                language.upper()
+            )
+
+
+    logging.info(
+        "BASE_DIR: %s",
+        BASE_DIR
+    )
+
+    logging.info(
+        "DOCUMENTS_DIR: %s",
+        DOCUMENTS_DIR
+    )
+
+    logging.info(
+        "DATABASE: %s",
+        DATABASE
+    )
+
+
     threading.Thread(
         target=build_index,
         daemon=True
     ).start()
 
 
+# ==========================================================
+# EJECUCIÓN
+# ==========================================================
+
 if __name__ == "__main__":
 
+    port = int(
+        PORT
+    )
+
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
-        port=int(PORT),
-        reload=False
+        port=port
     )
