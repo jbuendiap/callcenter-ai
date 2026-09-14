@@ -2039,3 +2039,80 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
+# ==========================================================
+        # SPLIT Y VECTORIZACIÓN
+        # ==========================================================
+
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+
+        split_docs = text_splitter.split_documents(
+            all_docs
+        )
+
+        logging.info(
+            "Documentos divididos en %s fragmentos.",
+            len(split_docs)
+        )
+
+        temp_db = FAISS.from_documents(
+            split_docs,
+            embeddings
+        )
+
+        with index_lock:
+            vector_db = temp_db
+
+        logging.info(
+            "=================================================="
+        )
+        logging.info(
+            "ÍNDICE FAISS CREADO EXITOSAMENTE"
+        )
+        logging.info(
+            "Total PDFs exitosos: %s",
+            successful_pdfs
+        )
+        logging.info(
+            "Total PDFs fallidos: %s",
+            failed_pdfs
+        )
+        logging.info(
+            "Total páginas procesadas: %s",
+            total_pages
+        )
+        logging.info(
+            "=================================================="
+        )
+
+    except Exception as e:
+        logging.error(
+            "Error crítico construyendo el índice FAISS: %s",
+            str(e)
+        )
+
+# ==========================================================
+# INICIO DE LA APLICACIÓN
+# ==========================================================
+
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+    
+    # Construir el índice FAISS en un hilo separado
+    # para evitar bloquear el arranque del servidor en Railway.
+    threading.Thread(
+        target=build_index,
+        daemon=True
+    ).start()
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(PORT),
+        reload=False
+    )
