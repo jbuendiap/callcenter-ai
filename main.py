@@ -6,8 +6,21 @@ import threading
 import json
 import requests
 
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # <--- 1. Importa esto
+
+app = FastAPI()
+
+# ==========================================================
+# CONFIGURACIÓN DE CORS
+# ==========================================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción puedes cambiar "*" por el dominio exacto de tu frontend (ej. ["https://tudominio.com"])
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos los métodos (GET, POST, etc.)
+    allow_headers=["*"],  # Permite todos los encabezados
+)
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
